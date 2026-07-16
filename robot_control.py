@@ -1,13 +1,13 @@
 import time
 import pygame
-import urx
 import multiprocessing as mp
 from copy import deepcopy
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 import os
-
+import math
+from ur_rtde import RTDEControlInterface, RTDEReceiveInterface
 
 class Robot:
 
@@ -23,19 +23,37 @@ class Robot:
         self.path = []
         self.last_heartbeat = time.time()
 
+        self.ctrl = None
+        self.recv = None
+        self.slave_ctrl = None
+        self.slave_recv = None
+
     def init_robot(self):
         self.logger.debug(f"Подключение к роботу IP: {self.IP}...")
-        self.robot = urx.Robot(self.IP)
-        self.logger.info(f"Успешное подключение к роботу IP: {self.IP}")
-        if self.is_master:
-            if self.slave_IP:
-                self.logger.debug(f"Подключение к роботу slave IP: {self.slave_IP}...")
-                self.slave = urx.Robot(self.slave_IP)
-                self.logger.info(f"Успешное подключение к роботу slave IP: {self.slave_IP}")
-            else:
-                self.logger.error(f"Отсутствует slave IP")
-                self.heartbeat.put((mp.current_process().name, "ERROR", "Отсутствует slave IP", time.time()))
-                exit(1)
+        try:
+            self.ctrl = RTDEControlInterface(self.IP)
+            self.recv = RTDEReceiveInterface(self.IP)
+            
+            if not self.ctrl.isConnected():
+                raise ConnectionError(f"Не удалось подключиться к RTDE контроллеру {self.IP}")
+            self.logger.info(f"Успешное подключение к роботу IP: {self.IP}")
+            
+            if self.is_master:
+                if self.slave_IP:
+                    self.logger.debug(f"Подключение к slave роботу (RTDE) IP: {self.slave_IP}...")
+                    self.slave_ctrl = RTDEControlInterface(self.slave_IP)
+                    self.slave_recv = RTDEReceiveInterface(self.slave_IP)
+                    if not self.slave_ctrl.isConnected():
+                        raise ConnectionError(f"Не удалось подключиться к RTDE контроллеру slave {self.slave_IP}")
+                    self.logger.info(f"Успешное подключение к slave роботу IP: {self.slave_IP}")
+                else:
+                    self.logger.error("Отсутствует slave IP")
+                    self.heartbeat.put((mp.current_process().name, "ERROR", "Отсутствует slave IP", time.time()))
+                    exit(1)
+        except Exception as e:
+            self.logger.error(f"Ошибка при подключении к {self.IP}: {e}")
+            self.heartbeat.put((mp.current_process().name, "ERROR", str(e), time.time()))
+            exit(1)
 
     def init_joystick(self):
         pygame.init()
@@ -92,6 +110,23 @@ class Robot:
             self.heartbeat.put((mp.current_process().name, "ALIVE", time.time()))
             self.last_heartbeat = current_time
 
+    def _pose_to_matrix(self, pose):
+        """Конвертирует 6-мерный вектор позы UR [x,y,z,rx,ry,rz] в матрицу 4x4"""
+        x, y, z, rx, ry, rz = pose
+        theta = math.sqrt(rx**2 + ry**2 + rz**2)
+        if theta < 1e-6:
+            return [[1, 0, 0, x], [0, 1, 0, y], [0, 0, 1, z], [0, 0, 0, 1]]
+        
+        ux, uy, uz = rx/theta, ry/theta, rz/theta
+        c, s, t = math.cos(theta), math.sin(theta), 1 - c
+        
+        return [
+            [t*ux*ux + c,   t*ux*uy - s*uz, t*ux*uz + s*uy, x],
+            [t*ux*uy + s*uz, t*uy*uy + c,    t*uy*uz - s*ux, y],
+            [t*ux*uz - s*uy, t*uy*uz + s*ux, t*uz*uz + c,    z],
+            [0, 0, 0, 1]
+        ]
+
     def get_slave_speeds(self):
         if not self.is_master:
             return
@@ -111,39 +146,36 @@ class Robot:
         pygame.event.pump()
 
         while self.running:
-
             self.update_heartbeat()
 
             if self.lock.value:
                 if not stop:
-                    self.robot.speedl_tool([0] * 6, 0.5, 2)
-                    self.robot.stopl()
+                    self.ctrl.stopScript()
                     stop = True
                 continue
             else:
                 stop = False
 
-            self.pos = self.robot.getl()
+            self.pos = self.recv.getActualTCPPose()
             if self.is_master:
-                self.slave_pos = self.slave.getl()
+                self.slave_pos = self.slave_recv.getActualTCPPose()
 
             self.speeds = self.get_speeds()
 
             try:
                 if self.joystick.get_button(0):  # если зажат курок
-                    self.robot.speedl_tool(self.speeds, 0.1,
-                                           2)  # перемещение робота в системе координат конечного звена
+                    self.ctrl.speedL(self.speeds, acceleration=0.1, dt=0.008)  # перемещение робота в системе координат конечного звена
                     if self.auto.value:  # если включён режим синхронного перемещения
                         if self.is_master:
                             self.slave_speeds = self.get_slave_speeds()
-                            self.slave.speedl(self.slave_speeds, 0.1, 2)
-                else:
-                    self.robot.speedl(self.speeds, 0.1,
-                                      2)  # если курок не зажат, то робот перемещается в системе координат основания
+                            self.slave_ctrl.speedL(self.slave_speeds, acceleration=0.1, dt=0.008)
 
-            except(urx.RobotException, TimeoutError, ConnectionError) as e:
+                else:
+                    self.robot.speedL(self.speeds, acceleration=0.1, dt=0.008)  # если курок не зажат, то робот перемещается в системе координат основания
+
+            except Exception as e:
                 error_msg = f"{type(e).__name__}:{str(e)[:100]}"
-                self.logger.error(f"Ошибка приработе с роботом IP: {self.IP}, сообщение: {error_msg}")
+                self.logger.error(f"Ошибка при работе с роботом IP: {self.IP}, сообщение: {error_msg}")
                 self.heartbeat.put((mp.current_process().name, "ERROR", error_msg, time.time()))
                 break
 
@@ -151,29 +183,34 @@ class Robot:
                     7)) and self.auto.value == 0 and self.is_master:  # включение синхронного режима
                 self.auto.value = 0
                 self.logger.info(f"Система переведена в синхронный режим")
+
             if self.joystick.get_button(7) and (not self.joystick.get_button(
-                    7)) and self.auto.value == 1 and self.is_master:  # включение асинхронного режима
+                    6)) and self.auto.value == 1 and self.is_master:  # включение асинхронного режима
                 self.auto.value = 1
                 self.logger.info(f"Система переведена в асинхронный режим")
+
             if self.joystick.get_button(8):
-                if self.auto.value:
-                    if self.is_master:
-                        self.slave.movel((self.slave_pos[0], self.slave_pos[1], self.slave_pos[2], 0, 3.14, 0), 0.2,
-                                         0.2)  # выравнивание хирурга
+                if self.auto.value and self.is_master:
+                    self.slave_ctrl.moveL(
+                        (self.slave_pos[0], self.slave_pos[1], self.slave_pos[2], 0, 3.14, 0), 
+                        velocity=0.2, acceleration=0.2, dt=0.008
+                    )  # выравнивание хирурга
 
             if self.joystick.get_button(10):
-                self.path.append(self.robot.getl())
+                self.path.append(self.recv.getActualTCPPose())
                 self.logger.debug(f"Записана точка {self.path[-1]}")
+                
             if self.joystick.get_button(11):
                 following_path = True
                 for pose in self.path:
                     self.logger.debug(f"Перемещение в точку с координатами {pose}")
-                    self.robot.movel(pose, acc=0.2, vel=0.2)
-                    while self.robot.is_program_running():
+                    self.ctrl.moveL(pose, velocity=0.2, acceleration=0.2, dt=0.008)
+                    while self.ctrl.isProgramRunning():
                         pygame.event.pump()
                         if self.joystick.get_button(11):
                             following_path = False
-                            self.robot.stop()
+                            self.ctrl.stopScript()
+                            break
 
             if self.joystick.get_button(9):
                 self.shared_path[0] = deepcopy(self.path)
@@ -186,9 +223,15 @@ class Robot:
     def close(self):
         if self.joystick:
             self.joystick.quit()
-        self.robot.close()
+        if self.ctrl:
+            self.ctrl.disconnect()
+        if self.recv:
+            self.recv.disconnect()
         if self.is_master:
-            self.slave.close()
+            if self.slave_ctrl:
+                self.slave_ctrl.disconnect()
+            if self.slave_recv:
+                self.slave_recv.disconnect()
 
 
 def main(IP, is_master, auto, lock, shared_path, heartbeat, slave_IP=None):
