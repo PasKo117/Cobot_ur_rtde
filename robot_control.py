@@ -130,7 +130,7 @@ class Robot:
     def get_slave_speeds(self):
         if not self.is_master:
             return
-        T = self.robot.get_pose().array  # матрица перехода основание-конечное звено
+        T = self._pose_to_matrix(self.recv.getActualTCPPose()) # матрица перехода основание-конечное звено
         # запись элементов матрицы в переменные
         z1, z2 = -T[0][2], -T[1][2]
         yx, yy = T[0][1], -T[1][1]
@@ -164,14 +164,14 @@ class Robot:
 
             try:
                 if self.joystick.get_button(0):  # если зажат курок
-                    self.ctrl.speedL(self.speeds, acceleration=0.1, dt=0.008)  # перемещение робота в системе координат конечного звена
+                    self.ctrl.speedToolL(self.speeds, acceleration=0.1, dt=0.008, lookahead_time=0.1, gain=300)  # перемещение робота в системе координат конечного звена
                     if self.auto.value:  # если включён режим синхронного перемещения
                         if self.is_master:
                             self.slave_speeds = self.get_slave_speeds()
-                            self.slave_ctrl.speedL(self.slave_speeds, acceleration=0.1, dt=0.008)
+                            self.slave_ctrl.speedToolL(self.slave_speeds, acceleration=0.1, dt=0.008, lookahead_time=0.1, gain=300)
 
                 else:
-                    self.robot.speedL(self.speeds, acceleration=0.1, dt=0.008)  # если курок не зажат, то робот перемещается в системе координат основания
+                    self.ctrl.speedL(self.speeds, acceleration=0.1, dt=0.008, lookahead_time=0.1, gain=300)  # если курок не зажат, то робот перемещается в системе координат основания
 
             except Exception as e:
                 error_msg = f"{type(e).__name__}:{str(e)[:100]}"
@@ -179,36 +179,42 @@ class Robot:
                 self.heartbeat.put((mp.current_process().name, "ERROR", error_msg, time.time()))
                 break
 
-            if self.joystick.get_button(6) and (not self.joystick.get_button(
-                    7)) and self.auto.value == 0 and self.is_master:  # включение синхронного режима
-                self.auto.value = 0
-                self.logger.info(f"Система переведена в синхронный режим")
-
-            if self.joystick.get_button(7) and (not self.joystick.get_button(
-                    6)) and self.auto.value == 1 and self.is_master:  # включение асинхронного режима
+            # Кнопка 6: Включение синхронного режима (Master-Slave)
+            if self.joystick.get_button(6) and (not self.joystick.get_button(7)) and self.auto.value == 0 and self.is_master:
                 self.auto.value = 1
-                self.logger.info(f"Система переведена в асинхронный режим")
+                self.logger.info("Система переведена в СИНХРОННЫЙ режим (Master-Slave)")
+
+            # Кнопка 7: Включение асинхронного режима (Только Master)
+            if self.joystick.get_button(7) and (not self.joystick.get_button(6)) and self.auto.value == 1 and self.is_master:
+                self.auto.value = 0
+                self.logger.info("Система переведена в АСИНХРОННЫЙ режим (Только Master)")
 
             if self.joystick.get_button(8):
                 if self.auto.value and self.is_master:
                     self.slave_ctrl.moveL(
                         (self.slave_pos[0], self.slave_pos[1], self.slave_pos[2], 0, 3.14, 0), 
-                        velocity=0.2, acceleration=0.2, dt=0.008
-                    )  # выравнивание хирурга
+                        velocity=0.2, acceleration=0.2)  # выравнивание хирурга
 
             if self.joystick.get_button(10):
                 self.path.append(self.recv.getActualTCPPose())
                 self.logger.debug(f"Записана точка {self.path[-1]}")
                 
             if self.joystick.get_button(11):
-                following_path = True
+                self.logger.info("Начало воспроизведения траектории")
                 for pose in self.path:
-                    self.logger.debug(f"Перемещение в точку с координатами {pose}")
-                    self.ctrl.moveL(pose, velocity=0.2, acceleration=0.2, dt=0.008)
+                    pygame.event.pump()
+                    if not self.joystick.get_button(11):
+                        self.ctrl.stopScript()
+                        self.logger.info("Воспроизведение траектории прервано пользователем")
+                        break
+                    
+                    self.logger.debug(f"Перемещение в точку: {pose}")
+                    self.ctrl.moveL(pose, velocity=0.2, acceleration=0.2)
+                    
+                    # Ожидание завершения движения к текущей точке с возможностью экстренного прерывания
                     while self.ctrl.isProgramRunning():
                         pygame.event.pump()
-                        if self.joystick.get_button(11):
-                            following_path = False
+                        if not self.joystick.get_button(11):
                             self.ctrl.stopScript()
                             break
 
