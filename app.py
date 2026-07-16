@@ -1007,8 +1007,13 @@ class RobotControlUI(ctk.CTk):
     def return_to_start(self):
         global starting_pose
         if starting_pose:
-            rob = urx.Robot("192.168.8.3", use_rt=True)
-            rob.movel(starting_pose)
+            ctrl = RTDEControlInterface("192.168.8.3")
+            recv = RTDEReceiveInterface("192.168.8.3")
+            ctrl.moveL(starting_pose, velocity=0.2, acceleration=0.2)
+            while ctrl.isProgramRunning():
+                time.sleep(0.01)
+            ctrl.disconnect()
+            recv.disconnect()
         else:
             self.show_error("Начальная точка маршрута отсутствует")
 
@@ -1016,34 +1021,35 @@ class RobotControlUI(ctk.CTk):
         pass
 
     def system_monitor(self):
-        diagnost = urx.Robot("192.168.8.3", use_rt=True)
-        hirurg = urx.Robot("192.168.8.4", use_rt=True)
+        diag_ctrl = RTDEControlInterface("192.168.8.3")
+        diag_recv = RTDEReceiveInterface("192.168.8.3")
+        hirurg_ctrl = RTDEControlInterface("192.168.8.4")
+        hirurg_recv = RTDEReceiveInterface("192.168.8.4")
+        
         while not self.monitor_stop_event.is_set():
-            diagnost_status = diagnost.is_running()
-            hirurg_status = hirurg.is_running()
-
-            diagnost_force = diagnost.get_tcp_force()
-            hirurg_force = hirurg.get_tcp_force()
-
-            diagnost_pose = diagnost.getl()
-            hirurg_pose = hirurg.getl()
-
-            diagnost_joints = diagnost.getj()
-            hirurg_joints = hirurg.getj()
-
-            # print(diagnost_force)
-            self.diagnost_force_data_label.config(
-                text=f'X:{diagnost_force[0]:.2f}, Y: {diagnost_force[1]:.2f}, Z: {diagnost_force[2]:.2f}')
-
-            self.telemetry_logger.log_data(
-                ["диагност"] + list(diagnost_pose[:3]) + list(diagnost_joints) + list(diagnost_force))
-            self.telemetry_logger.log_data(
-                ["хирург"] + list(hirurg_pose[:3]) + list(hirurg_joints) + list(hirurg_force))
+            diagnost_force = diag_recv.getActualTCPForce()
+            hirurg_force = hirurg_recv.getActualTCPForce()
+            diagnost_pose = diag_recv.getActualTCPPose()
+            hirurg_pose = hirurg_recv.getActualTCPPose()
+            diagnost_joints = diag_recv.getActualQ()
+            hirurg_joints = hirurg_recv.getActualQ()
+            
+            # Безопасное обновление UI, если элемент существует
+            if hasattr(self, 'diagnost_force_data_label'):
+                self.diagnost_force_data_label.config(
+                    text=f'X:{diagnost_force[0]:.2f}, Y: {diagnost_force[1]:.2f}, Z: {diagnost_force[2]:.2f}')
+            
+            if self.telemetry_logger and getattr(self.telemetry_logger, 'enabled', False):
+                self.telemetry_logger.log_data(
+                    ["диагност"] + list(diagnost_pose[:3]) + list(diagnost_joints) + list(diagnost_force))
+                self.telemetry_logger.log_data(
+                    ["хирург"] + list(hirurg_pose[:3]) + list(hirurg_joints) + list(hirurg_force))
             time.sleep(1)
-
-            # self.diagnost_force_data_entry.set(diagnost_force)
-        diagnost.close()
-        hirurg.close()
+            
+        diag_ctrl.disconnect()
+        diag_recv.disconnect()
+        hirurg_ctrl.disconnect()
+        hirurg_recv.disconnect()
 
     def watchdog(self):
         logger.debug("Запущен цикл мониторинга сердцебиения")
