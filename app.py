@@ -188,164 +188,152 @@ class CSVLogger:
 
 
 def force_control(threshold):
-    rob = urx.Robot("192.168.8.3", use_rt=True)
+    ctrl = RTDEControlInterface("192.168.8.3")
+    recv = RTDEReceiveInterface("192.168.8.3")
     global stop_route
     while True:
-        forces = rob.get_tcp_force()
+        forces = recv.getActualTCPForce()
         if forces[2] > threshold:
             force_lock.value = 1
-            rob.speedl_tool([0] * 6, 0.5, 1)
+            ctrl.speedToolL([0] * 6, 0.5, dt=0.008)
             stop_route.set()
             time.sleep(1)
-            rob.movel_tool([0, 0, -0.1, 0, 0, 0], 0.5, 0.5)
+            translate_tool(ctrl, recv, 0, 0, -0.1, 0.5, 0.5)
+            while ctrl.isProgramRunning():
+                time.sleep(0.01)
             time.sleep(10)
             force_lock.value = 0
         else:
             force_lock.value = 0
+        time.sleep(0.05)
 
 
 def route_follow(nsteps, S, pause_time, vel):
-    rob = urx.Robot("192.168.8.3", use_rt=True)
+    ctrl = RTDEControlInterface("192.168.8.3")
+    recv = RTDEReceiveInterface("192.168.8.3")
     global rob_us_data, us_lock, stop_route, starting_pose
-    force = [rob.get_tcp_force()[2]]
+    force = [recv.getActualTCPForce()[2]]
     t = [0]
     coordinates = [0]
     start = time.time()
     us_lock = True
-    starting_pose = rob.getl()
+    starting_pose = recv.getActualTCPPose()
     for x in range(nsteps):
         if stop_route.is_set():
             stop_route.clear()
             rob_us_data = [t, coordinates, force]
             app.show_warning("Маршрут остановлен")
-            rob.close()
+            ctrl.disconnect()
+            recv.disconnect()
             break
-        rob.translate((S[0], 0, 0), 0.1, vel)
-        while rob.is_program_running():
+
+        translate_base(ctrl, recv, S[0], 0, 0, vel, 0.1)
+        while ctrl.isProgramRunning():
             if stop_route.is_set():
                 stop_route.clear()
                 rob_us_data = [t, coordinates, force]
                 app.show_warning("Маршрут остановлен")
-                rob.close()
+                ctrl.disconnect()
+                recv.disconnect()
                 break
+            time.sleep(0.01)
             pass
-        rob.translate((0, S[1], 0), 0.1, vel)
-        while rob.is_program_running():
+
+        translate_base(ctrl, recv, S[1], 0, 0, vel, 0.1)
+        while ctrl.isProgramRunning():
             if stop_route.is_set():
                 stop_route.clear()
                 rob_us_data = [t, coordinates, force]
                 app.show_warning("Маршрут остановлен")
-                rob.close()
+                ctrl.disconnect()
+                recv.disconnect()
                 break
+            time.sleep(0.01)
             pass
-        rob.translate((0, 0, S[2]), 0.1, vel)
-        while rob.is_program_running():
+
+        translate_base(ctrl, recv, S[2], 0, 0, vel, 0.1)
+        while ctrl.isProgramRunning():
             if stop_route.is_set():
                 stop_route.clear()
                 rob_us_data = [t, coordinates, force]
                 app.show_warning("Маршрут остановлен")
-                rob.close()
+                ctrl.disconnect()
+                recv.disconnect()
                 break
+            time.sleep(0.01)
             pass
+
         t.append(time.time() - start)
         time.sleep(pause_time)
-        coordinates.append(rob.getl())
-        force.append(rob.get_tcp_force()[2])
+        coordinates.append(recv.getActualTCPPose())
+        force.append(recv.getActualTCPForce()[2])
 
-        # for x in range(nsteps):
-        #     # rob.translate((0, 0, -S[2]), 0.1, vel)
-        #     while rob.is_program_running():
-        #         pass
-        #     rob.translate((0, -S[1], 0), 0.1, vel)
-        #     while rob.is_program_running():
-        #         pass
-        #     rob.translate((-S[0], 0, 0), 0.1, vel)
-        #     while rob.is_program_running():
-        #         pass
         if stop_route.is_set():
             rob_us_data = [t, coordinates, force]
             app.show_warning("Маршрут остановлен")
-            rob.close()
+            ctrl.disconnect()
+            recv.disconnect()
             us_lock = False
             stop_route.clear()
             return
     rob_us_data = [t, coordinates, force]
-    # rob.translate((0, -S[1]*nsteps, 0), 0.1, 0.05)
-    # while rob.is_program_running():
-    #     pass
-    # rob.translate((-S[0]*nsteps, 0, 0), 0.1, 0.05)
-    # while rob.is_program_running():
-    #     pass
+ 
     us_lock = False
-    rob.close()
+    ctrl.disconnect()
+    recv.disconnect()
 
 
 def aphi(angle, nsteps, step, pause_time, vel, tool_length=0.645):
     global us_lock, stop_route
 
-    rob = urx.Robot("192.168.8.4", use_rt=True)
-    pose = rob.getl()
-    # rob.movel((pose[0], pose[1], pose[2], 3.14 / 2, 0, 0), acc=0.2, vel=0.2)
-    # while rob.is_program_running():
-    #     pass
-    # angle *= (pi / 180)
-    # r = tool_length + 0.195
-    # h = r * sin(angle) + 0.005
-    # delta = r - r * cos(angle)
-    # rob.translate((0, 0, h), 0.1, 0.5)
-    # while rob.is_program_running():
-    #     pass
-    # rob.translate_tool((0, 0, delta), 0.1, 0.1)
-    # while rob.is_program_running():
-    #     pass
-    # o = rob.get_orientation()
-    # o.rotate_xt(angle)
-    # rob.set_orientation(o, 0.1, 0.1)
-    # while rob.is_program_running():
-    #     pass
-    # rob.translate_tool((0, 0, nsteps * step), 0.1, vel)
-    # time.sleep(90)
+    ctrl = RTDEControlInterface("192.168.8.4")
+    recv = RTDEReceiveInterface("192.168.8.4")
 
     for s in range(nsteps):
-
-        rob.translate_tool((0, 0, -step), 0.1, vel)
-        while rob.is_program_running():
-            pass
-
+        translate_tool(ctrl, recv, 0, 0, -step, vel, 0.1)
+        while ctrl.isProgramRunning():
+            time.sleep(0.01)
         time.sleep(pause_time)
-    while rob.is_program_running():
-        pass
+    while ctrl.isProgramRunning():
+        time.sleep(0.01)
     us_lock = False
-    rob.close()
-
+    ctrl.disconnect()
+    recv.disconnect()
 
 def ashido_init(nsteps, step, angle=0, tool_length=0.645):
     global us_lock
-    rob = urx.Robot("192.168.8.4", use_rt=True)
-    pose = rob.getl()
+    ctrl = RTDEControlInterface("192.168.8.4")
+    recv = RTDEReceiveInterface("192.168.8.4")
+    pose = recv.getActualTCPPose()
     if angle != 0:
-        rob.movel((pose[0], pose[1], pose[2], 3.14 / 2, 0, 0), acc=0.2, vel=0.2)
-        while rob.is_program_running():
-            pass
-        angle *= (pi / 180)
-        r = tool_length + 0.195
-        h = r * sin(angle) + 0.005
-        delta = r - r * cos(angle)
-        rob.translate((0, 0, h), 0.1, 0.5)
-        while rob.is_program_running():
-            pass
-        rob.translate_tool((0, 0, delta), 0.1, 0.1)
-        while rob.is_program_running():
-            pass
-        o = rob.get_orientation()
-        o.rotate_xt(angle)
-        rob.set_orientation(o, 0.1, 0.1)
-        while rob.is_program_running():
-            pass
-    rob.translate_tool((0, 0, nsteps * step), 0.1, 0.1)
+        ctrl.moveL((pose[0], pose[1], pose[2], 3.14 / 2, 0, 0), velocity=0.2, acceleration=0.2)
+        while ctrl.isProgramRunning():
+            time.sleep(0.01)
+            
+    angle_rad = angle * (pi / 180)
+    r = tool_length + 0.195
+    h = r * sin(angle_rad) + 0.005
+    delta = r - r * cos(angle_rad)
+
+    translate_base(ctrl, recv, 0, 0, h, 0.5, 0.1)
+    while ctrl.isProgramRunning():
+        time.sleep(0.01)
+        
+    translate_tool(ctrl, recv, 0, 0, delta, 0.1, 0.1)
+    while ctrl.isProgramRunning():
+        time.sleep(0.01)
+        
+    rotate_tool_x(ctrl, recv, angle_rad, 0.1, 0.1)
+    while ctrl.isProgramRunning():
+        time.sleep(0.01)
+        
+    translate_tool(ctrl, recv, 0, 0, nsteps * step, 0.1, 0.1)
+    while ctrl.isProgramRunning():
+        time.sleep(0.01)
 
     us_lock = False
-    rob.close()
+    ctrl.disconnect()
+    recv.disconnect()
     program_lock.value = 0
 
 
@@ -353,12 +341,16 @@ async def ashido(nsteps, step, pause_time, vel, angle=0, is_hirurg=0, tool_lengt
     global rob_us_data, us_lock, stop_route
     loop = asyncio.get_running_loop()
 
-    hirurg = urx.Robot("192.168.8.4", use_rt=True)
-    diagnost = urx.Robot("192.168.8.3", use_rt=True)
+    hirurg_ctrl = RTDEControlInterface("192.168.8.4")
+    hirurg_recv = RTDEReceiveInterface("192.168.8.4")
+    diag_ctrl = RTDEControlInterface("192.168.8.3")
+    diag_recv = RTDEReceiveInterface("192.168.8.3")
 
     time.sleep(5)
 
-    if (not (hirurg.is_running() or diagnost.is_running())):
+    if not (hirurg_ctrl.isConnected() and diag_ctrl.isConnected()):
+        hirurg_ctrl.disconnect(); hirurg_recv.disconnect()
+        diag_ctrl.disconnect(); diag_recv.disconnect()
         return -1
     if angle != 0:
         dv = vel * cos(angle * pi / 180) if vel * cos(angle * pi / 180) >= 0.001 else 0.001
@@ -371,20 +363,23 @@ async def ashido(nsteps, step, pause_time, vel, angle=0, is_hirurg=0, tool_lengt
     coordinates = [0]
     start = time.time()
     us_lock = True
-    starting_pose = diagnost.getl()
+    starting_pose = diag_recv.getActualTCPPose()
 
     for s in range(nsteps):
-        await loop.run_in_executor(None, hirurg.translate_tool, ([0, 0, -step], vel, vel))
-        await loop.run_in_executor(None, diagnost.translate, ([0, -ds, 0], dv, dv))
-        while hirurg.is_program_running() or diagnost.is_program_running():
-            pass
+        await loop.run_in_executor(None, translate_tool, hirurg_ctrl, hirurg_recv, 0, 0, -step, vel, vel)
+        await loop.run_in_executor(None, translate_base, diag_ctrl, diag_recv, 0, -ds, 0, dv, dv)
+        while hirurg_ctrl.isProgramRunning() or diag_ctrl.isProgramRunning():
+            await asyncio.sleep(0.01)
+            
         t.append(time.time() - start)
-        coordinates.append(diagnost.getl())
+        coordinates.append(diag_recv.getActualTCPPose())
 
     rob_us_data = [t, coordinates]
     us_lock = False
-    hirurg.close()
-    diagnost.close()
+    hirurg_ctrl.disconnect()
+    hirurg_recv.disconnect()
+    diag_ctrl.disconnect()
+    diag_recv.disconnect()
     program_lock.value = 0
 
 
