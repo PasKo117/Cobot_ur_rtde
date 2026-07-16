@@ -14,7 +14,7 @@ import os
 from time import sleep
 import time
 from datetime import datetime
-import ur_rtde
+from ur_rtde import RTDEControlInterface, RTDEReceiveInterface
 import asyncio
 from threading import Thread
 import threading
@@ -101,7 +101,9 @@ def _pose_to_matrix(pose):
     if theta < 1e-6:
         return [[1, 0, 0, x], [0, 1, 0, y], [0, 0, 1, z], [0, 0, 0, 1]]
     ux, uy, uz = rx/theta, ry/theta, rz/theta
-    c, s, t = math.cos(theta), math.sin(theta), 1 - c
+    c = math.cos(theta)
+    s = math.sin(theta)
+    t = 1 - c    
     return [
         [t*ux*ux + c,   t*ux*uy - s*uz, t*ux*uz + s*uy, x],
         [t*ux*uy + s*uz, t*uy*uy + c,    t*uy*uz - s*ux, y],
@@ -310,10 +312,10 @@ def ashido_init(nsteps, step, angle=0, tool_length=0.645):
         while ctrl.isProgramRunning():
             time.sleep(0.01)
             
-    angle_rad = angle * (pi / 180)
+    angle_rad = angle * (math.pi / 180)
     r = tool_length + 0.195
-    h = r * sin(angle_rad) + 0.005
-    delta = r - r * cos(angle_rad)
+    h = r * math.sin(angle_rad) + 0.005
+    delta = r - r * math.cos(angle_rad)
 
     translate_base(ctrl, recv, 0, 0, h, 0.5, 0.1)
     while ctrl.isProgramRunning():
@@ -353,9 +355,8 @@ async def ashido(nsteps, step, pause_time, vel, angle=0, is_hirurg=0, tool_lengt
         diag_ctrl.disconnect(); diag_recv.disconnect()
         return -1
     if angle != 0:
-        dv = vel * cos(angle * pi / 180) if vel * cos(angle * pi / 180) >= 0.001 else 0.001
-        ds = step * cos(angle * pi / 180) if step * cos(angle * pi / 180) >= 0.001 else 0.001
-    else:
+        dv = vel * math.cos(angle * math.pi / 180) if vel * math.cos(angle * math.pi / 180) >= 0.001 else 0.001
+        ds = step * math.cos(angle * math.pi / 180) if step * math.cos(angle * math.pi / 180) >= 0.001 else 0.001    else:
         dv = vel
         ds = step
 
