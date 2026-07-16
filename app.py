@@ -14,12 +14,12 @@ import os
 from time import sleep
 import time
 from datetime import datetime
-import urx
+import ur_rtde
 import asyncio
 from threading import Thread
 import threading
 import multiprocessing as mp
-from math import sin, cos, tan, pi
+import math
 import asyncio
 from pathlib import Path
 import logging
@@ -95,6 +95,64 @@ def setup_status_logging(log_dir="logs", max_bytes=10 * 1024 * 1024, backup_coun
 
     return logger
 
+def _pose_to_matrix(pose):
+    x, y, z, rx, ry, rz = pose
+    theta = math.sqrt(rx**2 + ry**2 + rz**2)
+    if theta < 1e-6:
+        return [[1, 0, 0, x], [0, 1, 0, y], [0, 0, 1, z], [0, 0, 0, 1]]
+    ux, uy, uz = rx/theta, ry/theta, rz/theta
+    c, s, t = math.cos(theta), math.sin(theta), 1 - c
+    return [
+        [t*ux*ux + c,   t*ux*uy - s*uz, t*ux*uz + s*uy, x],
+        [t*ux*uy + s*uz, t*uy*uy + c,    t*uy*uz - s*ux, y],
+        [t*ux*uz - s*uy, t*uy*uz + s*ux, t*uz*uz + c,    z],
+        [0, 0, 0, 1]
+    ]
+
+def _matrix_to_pose(T):
+    x, y, z = T[0][3], T[1][3], T[2][3]
+    R = [[T[0][0], T[0][1], T[0][2]],
+         [T[1][0], T[1][1], T[1][2]],
+         [T[2][0], T[2][1], T[2][2]]]
+    theta = math.acos(max(-1.0, min(1.0, (R[0][0] + R[1][1] + R[2][2] - 1) / 2)))
+    if theta < 1e-6:
+        rx, ry, rz = 0.0, 0.0, 0.0
+    else:
+        rx = (R[2][1] - R[1][2]) / (2 * math.sin(theta)) * theta
+        ry = (R[0][2] - R[2][0]) / (2 * math.sin(theta)) * theta
+        rz = (R[1][0] - R[0][1]) / (2 * math.sin(theta)) * theta
+    return [x, y, z, rx, ry, rz]
+
+def _multiply_matrices(A, B):
+    return [[sum(a * b for a, b in zip(A_row, B_col)) for B_col in zip(*B)] for A_row in A]
+
+def translate_base(ctrl, recv, dx, dy, dz, vel, acc):
+    pose = recv.getActualTCPPose()
+    pose[0] += dx
+    pose[1] += dy
+    pose[2] += dz
+    ctrl.moveL(pose, velocity=vel, acceleration=acc)
+
+def translate_tool(ctrl, recv, dx, dy, dz, vel, acc):
+    pose = recv.getActualTCPPose()
+    T = _pose_to_matrix(pose)
+    delta_T = [[1, 0, 0, dx], [0, 1, 0, dy], [0, 0, 1, dz], [0, 0, 0, 1]]
+    T_new = _multiply_matrices(T, delta_T)
+    new_pose = _matrix_to_pose(T_new)
+    ctrl.moveL(new_pose, velocity=vel, acceleration=acc)
+
+def rotate_tool_x(ctrl, recv, angle_rad, vel, acc):
+    pose = recv.getActualTCPPose()
+    T = _pose_to_matrix(pose)
+    T_rot = [
+        [1, 0, 0, 0],
+        [0, math.cos(angle_rad), -math.sin(angle_rad), 0],
+        [0, math.sin(angle_rad), math.cos(angle_rad), 0],
+        [0, 0, 0, 1]
+    ]
+    T_new = _multiply_matrices(T, T_rot)
+    new_pose = _matrix_to_pose(T_new)
+    ctrl.moveL(new_pose, velocity=vel, acceleration=acc)
 
 class CSVLogger:
     def __init__(self, filename="logs/telemetry_log.csv"):
