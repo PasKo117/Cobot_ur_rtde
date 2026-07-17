@@ -7,6 +7,9 @@ import customtkinter as ctk
 # import CTkFileDialog as filedialog
 from CTkMessagebox import CTkMessagebox as mb
 
+import sys
+print(sys.version)
+
 import subprocess
 import socket
 import signal
@@ -356,7 +359,7 @@ async def ashido(nsteps, step, pause_time, vel, angle=0, is_hirurg=0, tool_lengt
         return -1
     if angle != 0:
         dv = vel * math.cos(angle * math.pi / 180) if vel * math.cos(angle * math.pi / 180) >= 0.001 else 0.001
-        ds = step * math.cos(angle * math.pi / 180) if step * math.cos(angle * math.pi / 180) >= 0.001 else 0.001    else:
+        ds = step * math.cos(angle * math.pi / 180) if step * math.cos(angle * math.pi / 180) >= 0.001 else 0.001
         dv = vel
         ds = step
 
