@@ -1035,16 +1035,15 @@ class RobotControlUI(ctk.CTk):
         pass
 
     def system_monitor(self):
-        diag_ctrl = diag_recv = hirurg_ctrl = hirurg_recv = None
+        diag_recv = None
+        hirurg_recv = None
 
         while not self.monitor_stop_event.is_set():
             try:
-                # Попытка подключения, если не подключено
-                if diag_ctrl is None or not diag_ctrl.isConnected():
-                    diag_ctrl = RTDEControlInterface("192.168.8.3")
+                # Используем ТОЛЬКО RTDEReceiveInterface, так как ControlInterface нужен для управления джойстиком
+                if diag_recv is None or not diag_recv.isConnected():
                     diag_recv = RTDEReceiveInterface("192.168.8.3")
-                if hirurg_ctrl is None or not hirurg_ctrl.isConnected():
-                    hirurg_ctrl = RTDEControlInterface("192.168.8.4")
+                if hirurg_recv is None or not hirurg_recv.isConnected():
                     hirurg_recv = RTDEReceiveInterface("192.168.8.4")
 
                 diagnost_force = diag_recv.getActualTCPForce()
@@ -1068,17 +1067,24 @@ class RobotControlUI(ctk.CTk):
 
             except Exception as e:
                 logger.warning(f"system_monitor: Ошибка подключения или чтения данных ({e}). Повтор через 3 сек...")
-                # Очистка ссылок для повторной попытки подключения
-                if diag_ctrl: diag_ctrl.disconnect()
-                if hirurg_ctrl: hirurg_ctrl.disconnect()
-                diag_ctrl = diag_recv = hirurg_ctrl = hirurg_recv = None
+                # Безопасное отключение перед повторной попыткой
+                if diag_recv:
+                    try: diag_recv.disconnect()
+                    except: pass
+                if hirurg_recv:
+                    try: hirurg_recv.disconnect()
+                    except: pass
+                diag_recv = None
+                hirurg_recv = None
                 time.sleep(3)
 
         # Корректное отключение при остановке потока
-        if diag_ctrl: diag_ctrl.disconnect()
-        if diag_recv: diag_recv.disconnect()
-        if hirurg_ctrl: hirurg_ctrl.disconnect()
-        if hirurg_recv: hirurg_recv.disconnect()
+        if diag_recv:
+            try: diag_recv.disconnect()
+            except: pass
+        if hirurg_recv:
+            try: hirurg_recv.disconnect()
+            except: pass
 
     def watchdog(self):
         logger.debug("Запущен цикл мониторинга сердцебиения")
