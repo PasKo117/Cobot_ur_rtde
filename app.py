@@ -8,6 +8,9 @@ import customtkinter as ctk
 from CTkMessagebox import CTkMessagebox as mb
 
 import sys
+
+import robot_control
+
 print(sys.version)
 
 import subprocess
@@ -136,7 +139,7 @@ def translate_base(ctrl, recv, dx, dy, dz, vel, acc):
     pose[0] += dx
     pose[1] += dy
     pose[2] += dz
-    ctrl.moveL(pose, velocity=vel, acceleration=acc)
+    ctrl.moveL(pose, speed=vel, acceleration=acc)
 
 def translate_tool(ctrl, recv, dx, dy, dz, vel, acc):
     pose = recv.getActualTCPPose()
@@ -144,7 +147,7 @@ def translate_tool(ctrl, recv, dx, dy, dz, vel, acc):
     delta_T = [[1, 0, 0, dx], [0, 1, 0, dy], [0, 0, 1, dz], [0, 0, 0, 1]]
     T_new = _multiply_matrices(T, delta_T)
     new_pose = _matrix_to_pose(T_new)
-    ctrl.moveL(new_pose, velocity=vel, acceleration=acc)
+    ctrl.moveL(new_pose, speed=vel, acceleration=acc)
 
 def rotate_tool_x(ctrl, recv, angle_rad, vel, acc):
     pose = recv.getActualTCPPose()
@@ -157,7 +160,7 @@ def rotate_tool_x(ctrl, recv, angle_rad, vel, acc):
     ]
     T_new = _multiply_matrices(T, T_rot)
     new_pose = _matrix_to_pose(T_new)
-    ctrl.moveL(new_pose, velocity=vel, acceleration=acc)
+    ctrl.moveL(new_pose, speed=vel, acceleration=acc)
 
 class CSVLogger:
     def __init__(self, filename="logs/telemetry_log.csv"):
@@ -200,7 +203,7 @@ def force_control(threshold):
         forces = recv.getActualTCPForce()
         if forces[2] > threshold:
             force_lock.value = 1
-            ctrl.speedToolL([0] * 6, 0.5, dt=0.008)
+            ctrl.speedToolL([0] * 6, acceleration=0.5, dt=0.008)
             stop_route.set()
             time.sleep(1)
             translate_tool(ctrl, recv, 0, 0, -0.1, 0.5, 0.5)
@@ -232,7 +235,7 @@ def route_follow(nsteps, S, pause_time, vel):
             recv.disconnect()
             break
 
-        translate_base(ctrl, recv, S[0], 0, 0, vel, 0.1)
+        translate_base(ctrl, recv, S[0], 0, 0, vel, 0.1) # Движение по X
         while ctrl.isProgramRunning():
             if stop_route.is_set():
                 stop_route.clear()
@@ -242,9 +245,8 @@ def route_follow(nsteps, S, pause_time, vel):
                 recv.disconnect()
                 break
             time.sleep(0.01)
-            pass
 
-        translate_base(ctrl, recv, S[1], 0, 0, vel, 0.1)
+        translate_base(ctrl, recv, 0, S[1], 0, vel, 0.1) # Движение по Y
         while ctrl.isProgramRunning():
             if stop_route.is_set():
                 stop_route.clear()
@@ -254,9 +256,8 @@ def route_follow(nsteps, S, pause_time, vel):
                 recv.disconnect()
                 break
             time.sleep(0.01)
-            pass
 
-        translate_base(ctrl, recv, S[2], 0, 0, vel, 0.1)
+        translate_base(ctrl, recv, 0, 0, S[2], vel, 0.1) # Движение по Z
         while ctrl.isProgramRunning():
             if stop_route.is_set():
                 stop_route.clear()
@@ -266,7 +267,6 @@ def route_follow(nsteps, S, pause_time, vel):
                 recv.disconnect()
                 break
             time.sleep(0.01)
-            pass
 
         t.append(time.time() - start)
         time.sleep(pause_time)
@@ -311,7 +311,7 @@ def ashido_init(nsteps, step, angle=0, tool_length=0.645):
     recv = RTDEReceiveInterface("192.168.8.4")
     pose = recv.getActualTCPPose()
     if angle != 0:
-        ctrl.moveL((pose[0], pose[1], pose[2], 3.14 / 2, 0, 0), velocity=0.2, acceleration=0.2)
+        ctrl.moveL((pose[0], pose[1], pose[2], 3.14 / 2, 0, 0), speed=0.2, acceleration=0.2)
         while ctrl.isProgramRunning():
             time.sleep(0.01)
             
@@ -360,6 +360,7 @@ async def ashido(nsteps, step, pause_time, vel, angle=0, is_hirurg=0, tool_lengt
     if angle != 0:
         dv = vel * math.cos(angle * math.pi / 180) if vel * math.cos(angle * math.pi / 180) >= 0.001 else 0.001
         ds = step * math.cos(angle * math.pi / 180) if step * math.cos(angle * math.pi / 180) >= 0.001 else 0.001
+    else:
         dv = vel
         ds = step
 
@@ -784,7 +785,9 @@ class RobotControlUI(ctk.CTk):
             'target': Power_On_D.main
         }
         self.heartbeat.put(('power_on_diagnost', "AWAITING"))
-        self.monitor.start()
+
+        if not self.monitor.is_alive():
+            self.monitor.start()
 
     def system_stop(self):
         print('system_stopped')
@@ -818,8 +821,9 @@ class RobotControlUI(ctk.CTk):
         self.heartbeat.put(('power_off_diagnost', 'AWAITING'))
 
     def control_launch(self):
+        global us_lock
         sleep(1)
-        if self.us_lock:
+        if us_lock:
             program_lock.value = 0
             self.control_stop_btn.configure(state=tk.NORMAL)
             self.control_launch_btn.configure(state=tk.DISABLED)
@@ -900,17 +904,23 @@ class RobotControlUI(ctk.CTk):
             self.cam_h_state = False
 
     def start_route(self):
-        if (program_lock.value == 0):
+        try:
+            nsteps = int(self.num_steps_entry.get())
+            SX = float(self.step_x_entry.get())
+            SY = float(self.step_y_entry.get())
+            SZ = float(self.step_z_entry.get())
+            pause = float(self.pause_time_entry.get())
+            vel = float(self.velocity_entry.get())
+        except ValueError:
+            self.show_error("Пожалуйста, заполните все числовые поля корректными значениями!")
+            return
+
+        if program_lock.value == 0:
             program_lock.value = 1
             self.show_warning('Управление диагноста отключено')
             sleep(5)
-        nsteps = int(self.num_steps_entry.get())
-        SX = float(self.step_x_entry.get())
-        SY = float(self.step_y_entry.get())
-        SZ = float(self.step_z_entry.get())
-        pause = int(self.pause_time_entry.get())
-        vel = float(self.velocity_entry.get())
-        us_thread = Thread(target=route_follow, args=(nsteps, [-SX, -SY, - SZ], pause, vel))
+
+        us_thread = Thread(target=route_follow, args=(nsteps, [-SX, -SY, -SZ], pause, vel))
         us_thread.start()
 
     def start_aphi(self):
@@ -1013,7 +1023,7 @@ class RobotControlUI(ctk.CTk):
         if starting_pose:
             ctrl = RTDEControlInterface("192.168.8.3")
             recv = RTDEReceiveInterface("192.168.8.3")
-            ctrl.moveL(starting_pose, velocity=0.2, acceleration=0.2)
+            ctrl.moveL(starting_pose, speed=0.2, acceleration=0.2)
             while ctrl.isProgramRunning():
                 time.sleep(0.01)
             ctrl.disconnect()
@@ -1025,35 +1035,50 @@ class RobotControlUI(ctk.CTk):
         pass
 
     def system_monitor(self):
-        diag_ctrl = RTDEControlInterface("192.168.8.3")
-        diag_recv = RTDEReceiveInterface("192.168.8.3")
-        hirurg_ctrl = RTDEControlInterface("192.168.8.4")
-        hirurg_recv = RTDEReceiveInterface("192.168.8.4")
-        
+        diag_ctrl = diag_recv = hirurg_ctrl = hirurg_recv = None
+
         while not self.monitor_stop_event.is_set():
-            diagnost_force = diag_recv.getActualTCPForce()
-            hirurg_force = hirurg_recv.getActualTCPForce()
-            diagnost_pose = diag_recv.getActualTCPPose()
-            hirurg_pose = hirurg_recv.getActualTCPPose()
-            diagnost_joints = diag_recv.getActualQ()
-            hirurg_joints = hirurg_recv.getActualQ()
-            
-            # Безопасное обновление UI, если элемент существует
-            if hasattr(self, 'diagnost_force_data_label'):
-                self.diagnost_force_data_label.config(
-                    text=f'X:{diagnost_force[0]:.2f}, Y: {diagnost_force[1]:.2f}, Z: {diagnost_force[2]:.2f}')
-            
-            if self.telemetry_logger and getattr(self.telemetry_logger, 'enabled', False):
-                self.telemetry_logger.log_data(
-                    ["диагност"] + list(diagnost_pose[:3]) + list(diagnost_joints) + list(diagnost_force))
-                self.telemetry_logger.log_data(
-                    ["хирург"] + list(hirurg_pose[:3]) + list(hirurg_joints) + list(hirurg_force))
-            time.sleep(1)
-            
-        diag_ctrl.disconnect()
-        diag_recv.disconnect()
-        hirurg_ctrl.disconnect()
-        hirurg_recv.disconnect()
+            try:
+                # Попытка подключения, если не подключено
+                if diag_ctrl is None or not diag_ctrl.isConnected():
+                    diag_ctrl = RTDEControlInterface("192.168.8.3")
+                    diag_recv = RTDEReceiveInterface("192.168.8.3")
+                if hirurg_ctrl is None or not hirurg_ctrl.isConnected():
+                    hirurg_ctrl = RTDEControlInterface("192.168.8.4")
+                    hirurg_recv = RTDEReceiveInterface("192.168.8.4")
+
+                diagnost_force = diag_recv.getActualTCPForce()
+                hirurg_force = hirurg_recv.getActualTCPForce()
+                diagnost_pose = diag_recv.getActualTCPPose()
+                hirurg_pose = hirurg_recv.getActualTCPPose()
+                diagnost_joints = diag_recv.getActualQ()
+                hirurg_joints = hirurg_recv.getActualQ()
+
+                if hasattr(self, 'diagnost_force_data_label'):
+                    self.diagnost_force_data_label.config(
+                        text=f'X:{diagnost_force[0]:.2f}, Y: {diagnost_force[1]:.2f}, Z: {diagnost_force[2]:.2f}')
+
+                if self.telemetry_logger and getattr(self.telemetry_logger, 'enabled', False):
+                    self.telemetry_logger.log_data(
+                        ["диагност"] + list(diagnost_pose[:3]) + list(diagnost_joints) + list(diagnost_force))
+                    self.telemetry_logger.log_data(
+                        ["хирург"] + list(hirurg_pose[:3]) + list(hirurg_joints) + list(hirurg_force))
+
+                time.sleep(1)
+
+            except Exception as e:
+                logger.warning(f"system_monitor: Ошибка подключения или чтения данных ({e}). Повтор через 3 сек...")
+                # Очистка ссылок для повторной попытки подключения
+                if diag_ctrl: diag_ctrl.disconnect()
+                if hirurg_ctrl: hirurg_ctrl.disconnect()
+                diag_ctrl = diag_recv = hirurg_ctrl = hirurg_recv = None
+                time.sleep(3)
+
+        # Корректное отключение при остановке потока
+        if diag_ctrl: diag_ctrl.disconnect()
+        if diag_recv: diag_recv.disconnect()
+        if hirurg_ctrl: hirurg_ctrl.disconnect()
+        if hirurg_recv: hirurg_recv.disconnect()
 
     def watchdog(self):
         logger.debug("Запущен цикл мониторинга сердцебиения")
@@ -1124,9 +1149,12 @@ class RobotControlUI(ctk.CTk):
             time.sleep(1.0)
 
     def _close_process(self, name):
-        self.processes[name]['process'].terminate()
-        self.processes[name]['process'].join(timeout=3.0)
-        self.processes[name] = None
+        if name in self.processes and self.processes[name] is not None:
+            proc = self.processes[name]['process']
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=3.0)
+            del self.processes[name]
 
     def _start_process(self, name):
         logger.info(f"Запуск процесса {name}")
@@ -1218,13 +1246,14 @@ class RobotControlUI(ctk.CTk):
 
 
 def on_closing():
-    logger.info(f"Получен сигнал закрытия приложения")
+    logger.info("Получен сигнал закрытия приложения")
     for name in list(app.processes.keys()):
-        app.processes[name]["process"].kill()
-        app.processes[name]["process"].join(timeout=2.0)
+        proc_data = app.processes.get(name)
+        if proc_data and proc_data["process"] is not None and proc_data["process"].is_alive():
+            proc_data["process"].kill()
+            proc_data["process"].join(timeout=2.0)
     logger.info("Все процессы остановлены. Завершение работы.")
     app.destroy()
-
 
 if __name__ == '__main__':
     logger = setup_status_logging()
