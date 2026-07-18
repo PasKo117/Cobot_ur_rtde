@@ -114,7 +114,7 @@ class Service(object):
 
             stop = False
             self.get_btn_state()
-            speeds = [0, 0, 0, 0, 0, 0]
+            speeds = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
             speeds[1] = 1 * self.joystick.get_hat(0)[1] * self.linear_velocity
             speeds[0] = 1 * self.joystick.get_hat(0)[0] * self.linear_velocity
@@ -131,9 +131,9 @@ class Service(object):
 
             try:
                 if self.cmd.btn0:
-                    self.ctrl.speedToolL(speeds, acceleration=0.1, dt=0.008, lookahead_time=0.1, gain=300)
+                    self.ctrl.speedToolL(speeds, acceleration=0.1, time=0.0)
                 else:
-                    self.ctrl.speedL(speeds, acceleration=0.1, dt=0.008, lookahead_time=0.1, gain=300)
+                    self.ctrl.speedL(speeds, acceleration=0.1, time=0.0)
             except Exception as e:
                 error_msg = f"{type(e).__name__}:{str(e)[:100]}"
                 proc_logger.error(f"Ошибка при работе с роботом: {error_msg}")

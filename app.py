@@ -203,7 +203,7 @@ def force_control(threshold):
         forces = recv.getActualTCPForce()
         if forces[2] > threshold:
             force_lock.value = 1
-            ctrl.speedToolL([0] * 6, acceleration=0.5, dt=0.008)
+            ctrl.speedToolL([0.0] * 6, acceleration=0.5, time=0.0)
             stop_route.set()
             time.sleep(1)
             translate_tool(ctrl, recv, 0, 0, -0.1, 0.5, 0.5)
