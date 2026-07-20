@@ -9,7 +9,6 @@ import os
 import math
 from ur_rtde import RTDEControlInterface, RTDEReceiveInterface
 
-print("=== ФАЙЛ robot_control.py УСПЕШНО ЗАМЕНЕН И ЗАГРУЖЕН ===")
 
 class Robot:
     def __init__(self, IP, is_master, logger, auto, lock, shared_path, heartbeat, slave_IP=None):
@@ -94,42 +93,47 @@ class Robot:
 
     def get_speeds(self):
         linear_vel = 0.05  # 5 см/сек
-        rot_vel = 0.15  # рад/сек
-
+        rot_vel = 0.2     # рад/сек
         speeds = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        dz = getattr(self, 'deadzone', 0.3) # Мёртвая зона
 
-        # Читаем ВСЕ оси джойстика
-        axis0 = float(self.joystick.get_axis(0))  # Основной стик X
-        axis1 = float(self.joystick.get_axis(1))  # Основной стик Y
-        axis2 = float(self.joystick.get_axis(2))  # Ползунок (Throttle)
-        axis3 = float(self.joystick.get_axis(3))  # Твист (Twist) - ПРОБЛЕМНАЯ ОСЬ
+        # === ЧТЕНИЕ ОСЕЙ ПО ВАШЕЙ СХЕМЕ ===
+        axis0 = float(self.joystick.get_axis(0))
+        axis1 = float(self.joystick.get_axis(1))
+        axis2 = float(self.joystick.get_axis(2))
+        axis3 = float(self.joystick.get_axis(3))
+        but4 = float(self.joystick.get_button(3))
+        but6 = float(self.joystick.get_button(5))
+        hat = self.joystick.get_hat(0)
 
         # === DEADMAN SWITCH (Курок - кнопка 0) ===
         trigger_pressed = (self.joystick.get_button(0) == 1)
 
         if trigger_pressed:
-            # 1. Основной стик (Оси 0,1) -> Движение по X, Y
-            speeds[0] = (axis0 if abs(axis0) > self.deadzone else 0.0) * linear_vel
-            speeds[1] = (axis1 if abs(axis1) > self.deadzone else 0.0) * linear_vel
 
-            # 2. Ползунок (Ось 2) -> Движение по Z
-            # Logitech Extreme 3D Pro: 1.0 = на себя, 0.0 = от себя
-            if axis2 > 0.7:
-                speeds[2] = linear_vel  # Вверх
-            elif axis2 < 0.3:
-                speeds[2] = -linear_vel  # Вниз
+            # 1. Крестовина -> XY
+            if hat is not None:
+                speeds[0] = float(hat[1]) * linear_vel * (-1)  # Вверх/вниз крестовины -> X
+                speeds[1] = float(hat[0]) * linear_vel  # Влево/вправо крестовины -> Y
+
+            # Вспомогательная функция для применения мёртвой зоны вокруг нуля
+            def apply_dz(val):
+                return val if abs(val) > dz else 0.0
+
+            # 2. повороты
+            speeds[3] = apply_dz(axis0) * rot_vel   #X
+            speeds[4] = apply_dz(axis1) * rot_vel   #Y
+            speeds[5] = apply_dz(axis2) * rot_vel * (-1)  #Z
+
+            # 4. Z (Ось 3 - Вверх/Вниз)
+            if  but4 == 1:
+                speeds[2] = -linear_vel
+            elif but6 == 1:
+                speeds[2] = linear_vel
             else:
                 speeds[2] = 0.0
 
-            # 3. Твист (Ось 3) -> Вращение вокруг Z
-            # ВАЖНО: Увеличенная мертвая зона 0.6 из-за "залипания" на -1.0
-            speeds[5] = (axis3 if abs(axis3) > 0.6 else 0.0) * rot_vel
 
-            # 4. Крестовина (Hat) -> Вращение Rx, Ry
-            hat = self.joystick.get_hat(0)
-            if hat is not None:
-                speeds[3] = float(hat[1]) * rot_vel  # Вверх/вниз -> Rx
-                speeds[4] = float(hat[0]) * rot_vel  # Влево/вправо -> Ry
 
         # === ДЕТАЛЬНАЯ ТЕЛЕМЕТРИЯ ===
         if not hasattr(self, 'last_telemetry'):
@@ -138,14 +142,11 @@ class Robot:
         if time.time() - self.last_telemetry > 1.0:
             joy_id = self.joystick.get_id()
             print("\n" + "=" * 70)
-            print(f"🕹 ДЖОЙСТИК ID: {joy_id} | Процесс: {'МАСТЕР' if self.is_master else 'СЛЕЙВ'}")
-            print(f"📊 Сырые оси:   X={axis0:6.3f} | Y={axis1:6.3f} | Throttle={axis2:6.3f} | Twist={axis3:6.3f}")
-            print(f"🎯 Курок (Кн.0): {'🔴 ЗАЖАТ' if trigger_pressed else '⚪ ОТПУЩЕН'}")
-            print(
-                f"🔘 Кн.4: {'НАЖАТА' if self.joystick.get_button(4) else 'ОТП'} | Кн.5: {'НАЖАТА' if self.joystick.get_button(5) else 'ОТП'}")
-            print(f"⚙️  Скорости [X, Y, Z, Rx, Ry, Rz]:")
-            print(
-                f"   [{speeds[0]:6.3f}, {speeds[1]:6.3f}, {speeds[2]:6.3f}, {speeds[3]:6.3f}, {speeds[4]:6.3f}, {speeds[5]:6.3f}]")
+            print(f"ДЖОЙСТИК ID: {joy_id} | Процесс: {'МАСТЕР' if self.is_master else 'СЛЕЙВ'}")
+            print(f"Сырые оси:   X(0)={axis0:6.3f} | Y(1)={axis1:6.3f} | Rz(2)={axis2:6.3f} | Z(3)={axis3:6.3f}")
+            print(f"Курок (Кн.0): {'ЗАЖАТ' if trigger_pressed else 'ОТПУЩЕН'}")
+            print(f"Скорости [X, Y, Z, Rx, Ry, Rz]:")
+            print(f"   [{speeds[0]:6.3f}, {speeds[1]:6.3f}, {speeds[2]:6.3f}, {speeds[3]:6.3f}, {speeds[4]:6.3f}, {speeds[5]:6.3f}]")
             print("=" * 70 + "\n")
             self.last_telemetry = time.time()
 
@@ -223,8 +224,6 @@ class Robot:
             # Дополнительная страховка прямо перед вызовом
             self.speeds = [float(x) for x in self.speeds]
 
-            # ОТЛАДОЧНЫЙ ВЫВОД: напечатает в консоль точные типы данных каждого элемента
-            print(f"!!! DEBUG speedL: speeds={self.speeds}, types={[type(x).__name__ for x in self.speeds]}")
 
             try:
                 # Движение мастера (ЗАМЕНЕНО time=0.0 НА time=0.0)
