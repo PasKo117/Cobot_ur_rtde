@@ -45,6 +45,7 @@ import Power_On_D
 import Power_Off_H
 import Power_Off_D
 import robot_control
+from laser_sensor_lib import LaserSensorClient
 
 rob_us_data = []
 us_lock = False
@@ -101,21 +102,23 @@ def setup_status_logging(log_dir="logs", max_bytes=10 * 1024 * 1024, backup_coun
 
     return logger
 
+
 def _pose_to_matrix(pose):
     x, y, z, rx, ry, rz = pose
-    theta = math.sqrt(rx**2 + ry**2 + rz**2)
+    theta = math.sqrt(rx ** 2 + ry ** 2 + rz ** 2)
     if theta < 1e-6:
         return [[1, 0, 0, x], [0, 1, 0, y], [0, 0, 1, z], [0, 0, 0, 1]]
-    ux, uy, uz = rx/theta, ry/theta, rz/theta
+    ux, uy, uz = rx / theta, ry / theta, rz / theta
     c = math.cos(theta)
     s = math.sin(theta)
-    t = 1 - c    
+    t = 1 - c
     return [
-        [t*ux*ux + c,   t*ux*uy - s*uz, t*ux*uz + s*uy, x],
-        [t*ux*uy + s*uz, t*uy*uy + c,    t*uy*uz - s*ux, y],
-        [t*ux*uz - s*uy, t*uy*uz + s*ux, t*uz*uz + c,    z],
+        [t * ux * ux + c, t * ux * uy - s * uz, t * ux * uz + s * uy, x],
+        [t * ux * uy + s * uz, t * uy * uy + c, t * uy * uz - s * ux, y],
+        [t * ux * uz - s * uy, t * uy * uz + s * ux, t * uz * uz + c, z],
         [0, 0, 0, 1]
     ]
+
 
 def _matrix_to_pose(T):
     x, y, z = T[0][3], T[1][3], T[2][3]
@@ -131,8 +134,10 @@ def _matrix_to_pose(T):
         rz = (R[1][0] - R[0][1]) / (2 * math.sin(theta)) * theta
     return [x, y, z, rx, ry, rz]
 
+
 def _multiply_matrices(A, B):
     return [[sum(a * b for a, b in zip(A_row, B_col)) for B_col in zip(*B)] for A_row in A]
+
 
 def translate_base(ctrl, recv, dx, dy, dz, vel, acc):
     pose = recv.getActualTCPPose()
@@ -141,6 +146,7 @@ def translate_base(ctrl, recv, dx, dy, dz, vel, acc):
     pose[2] += dz
     ctrl.moveL(pose, speed=vel, acceleration=acc)
 
+
 def translate_tool(ctrl, recv, dx, dy, dz, vel, acc):
     pose = recv.getActualTCPPose()
     T = _pose_to_matrix(pose)
@@ -148,6 +154,7 @@ def translate_tool(ctrl, recv, dx, dy, dz, vel, acc):
     T_new = _multiply_matrices(T, delta_T)
     new_pose = _matrix_to_pose(T_new)
     ctrl.moveL(new_pose, speed=vel, acceleration=acc)
+
 
 def rotate_tool_x(ctrl, recv, angle_rad, vel, acc):
     pose = recv.getActualTCPPose()
@@ -161,6 +168,7 @@ def rotate_tool_x(ctrl, recv, angle_rad, vel, acc):
     T_new = _multiply_matrices(T, T_rot)
     new_pose = _matrix_to_pose(T_new)
     ctrl.moveL(new_pose, speed=vel, acceleration=acc)
+
 
 class CSVLogger:
     def __init__(self, filename="logs/telemetry_log.csv"):
@@ -235,7 +243,7 @@ def route_follow(nsteps, S, pause_time, vel):
             recv.disconnect()
             break
 
-        translate_base(ctrl, recv, S[0], 0, 0, vel, 0.1) # Движение по X
+        translate_base(ctrl, recv, S[0], 0, 0, vel, 0.1)  # Движение по X
         while ctrl.isProgramRunning():
             if stop_route.is_set():
                 stop_route.clear()
@@ -246,7 +254,7 @@ def route_follow(nsteps, S, pause_time, vel):
                 break
             time.sleep(0.01)
 
-        translate_base(ctrl, recv, 0, S[1], 0, vel, 0.1) # Движение по Y
+        translate_base(ctrl, recv, 0, S[1], 0, vel, 0.1)  # Движение по Y
         while ctrl.isProgramRunning():
             if stop_route.is_set():
                 stop_route.clear()
@@ -257,7 +265,7 @@ def route_follow(nsteps, S, pause_time, vel):
                 break
             time.sleep(0.01)
 
-        translate_base(ctrl, recv, 0, 0, S[2], vel, 0.1) # Движение по Z
+        translate_base(ctrl, recv, 0, 0, S[2], vel, 0.1)  # Движение по Z
         while ctrl.isProgramRunning():
             if stop_route.is_set():
                 stop_route.clear()
@@ -282,7 +290,7 @@ def route_follow(nsteps, S, pause_time, vel):
             stop_route.clear()
             return
     rob_us_data = [t, coordinates, force]
- 
+
     us_lock = False
     ctrl.disconnect()
     recv.disconnect()
@@ -305,6 +313,7 @@ def aphi(angle, nsteps, step, pause_time, vel, tool_length=0.645):
     ctrl.disconnect()
     recv.disconnect()
 
+
 def ashido_init(nsteps, step, angle=0, tool_length=0.645):
     global us_lock
     ctrl = RTDEControlInterface("192.168.8.4")
@@ -314,7 +323,7 @@ def ashido_init(nsteps, step, angle=0, tool_length=0.645):
         ctrl.moveL((pose[0], pose[1], pose[2], 3.14 / 2, 0, 0), speed=0.2, acceleration=0.2)
         while ctrl.isProgramRunning():
             time.sleep(0.01)
-            
+
     angle_rad = angle * (math.pi / 180)
     r = tool_length + 0.195
     h = r * math.sin(angle_rad) + 0.005
@@ -323,15 +332,15 @@ def ashido_init(nsteps, step, angle=0, tool_length=0.645):
     translate_base(ctrl, recv, 0, 0, h, 0.5, 0.1)
     while ctrl.isProgramRunning():
         time.sleep(0.01)
-        
+
     translate_tool(ctrl, recv, 0, 0, delta, 0.1, 0.1)
     while ctrl.isProgramRunning():
         time.sleep(0.01)
-        
+
     rotate_tool_x(ctrl, recv, angle_rad, 0.1, 0.1)
     while ctrl.isProgramRunning():
         time.sleep(0.01)
-        
+
     translate_tool(ctrl, recv, 0, 0, nsteps * step, 0.1, 0.1)
     while ctrl.isProgramRunning():
         time.sleep(0.01)
@@ -354,8 +363,10 @@ async def ashido(nsteps, step, pause_time, vel, angle=0, is_hirurg=0, tool_lengt
     time.sleep(5)
 
     if not (hirurg_ctrl.isConnected() and diag_ctrl.isConnected()):
-        hirurg_ctrl.disconnect(); hirurg_recv.disconnect()
-        diag_ctrl.disconnect(); diag_recv.disconnect()
+        hirurg_ctrl.disconnect();
+        hirurg_recv.disconnect()
+        diag_ctrl.disconnect();
+        diag_recv.disconnect()
         return -1
     if angle != 0:
         dv = vel * math.cos(angle * math.pi / 180) if vel * math.cos(angle * math.pi / 180) >= 0.001 else 0.001
@@ -375,7 +386,7 @@ async def ashido(nsteps, step, pause_time, vel, angle=0, is_hirurg=0, tool_lengt
         await loop.run_in_executor(None, translate_base, diag_ctrl, diag_recv, 0, -ds, 0, dv, dv)
         while hirurg_ctrl.isProgramRunning() or diag_ctrl.isProgramRunning():
             await asyncio.sleep(0.01)
-            
+
         t.append(time.time() - start)
         coordinates.append(diag_recv.getActualTCPPose())
 
@@ -422,13 +433,21 @@ class RobotControlUI(ctk.CTk):
             'hir_force': ctk.StringVar(value="0.00")
         }
 
+        # Инициализация лазерных датчиков
+        self.laser_client = LaserSensorClient(
+            pi_ip='192.168.8.37',
+            pi_user='pi',
+            pi_pass='rasprobot1'
+        )
+        self.laser_connected = False
+
         self.telemetry_logger = None
 
         # Создание интерфейса
         self.create_tabs()
 
         self.monitor = Thread(target=self.system_monitor, daemon=True)
-        # self.monitor.start()
+        self.monitor.start()
 
         self.watchdog_thread = Thread(target=self.watchdog, daemon=True, name="Watchdog")
         self.watchdog_thread.start()
@@ -488,7 +507,8 @@ class RobotControlUI(ctk.CTk):
         self.control_initiate_btn.grid(column=0, row=2, padx=10, pady=5, sticky="ew")
 
         self.control_disable_btn = ctk.CTkButton(left_frame, text='Отключить контроллеры',
-                                                  command=self.control_initiate, state="disabled", fg_color="#E74C3C", hover_color="#C0392B")
+                                                 command=self.control_initiate, state="disabled", fg_color="#E74C3C",
+                                                 hover_color="#C0392B")
         self.control_disable_btn.grid(column=1, row=2, padx=10, pady=5, sticky="ew")
 
         # Разделитель
@@ -557,7 +577,7 @@ class RobotControlUI(ctk.CTk):
 
         # Количество шагов
         ctk.CTkLabel(params_frame, text="Количество шагов:").grid(column=0, row=1, sticky="e", padx=10, pady=5)
-        self.num_steps_entry = ctk.CTkEntry(params_frame, width=100,placeholder_text='30')
+        self.num_steps_entry = ctk.CTkEntry(params_frame, width=100, placeholder_text='30')
         self.num_steps_entry.grid(column=1, row=1, sticky="w", padx=5, pady=5)
 
         # Величина шага
@@ -568,11 +588,11 @@ class RobotControlUI(ctk.CTk):
         self.step_x_entry.grid(column=3, row=2, padx=2, pady=5)
 
         ctk.CTkLabel(params_frame, text="Y:").grid(column=4, row=2, padx=5)
-        self.step_y_entry = ctk.CTkEntry(params_frame, width=60,placeholder_text='0.005')
+        self.step_y_entry = ctk.CTkEntry(params_frame, width=60, placeholder_text='0.005')
         self.step_y_entry.grid(column=5, row=2, padx=2, pady=5)
 
         ctk.CTkLabel(params_frame, text="Z:").grid(column=6, row=2, padx=5)
-        self.step_z_entry = ctk.CTkEntry(params_frame, width=60,placeholder_text='0.005')
+        self.step_z_entry = ctk.CTkEntry(params_frame, width=60, placeholder_text='0.005')
         self.step_z_entry.grid(column=7, row=2, padx=2, pady=5)
 
         # Время и скорость
@@ -796,7 +816,7 @@ class RobotControlUI(ctk.CTk):
         self.control_stop_btn.configure(state=ctk.DISABLED)
         self.control_launch_btn.configure(state=ctk.DISABLED)
         self.align_btn.configure(state=ctk.DISABLED)
-        params = (self.heartbeat, )
+        params = (self.heartbeat,)
 
         self.processes['power_off_surgeon'] = {
             'process': mp.Process(target=Power_Off_H.main, daemon=True, name='power_off_surgeon', args=params),
@@ -857,7 +877,7 @@ class RobotControlUI(ctk.CTk):
         self.heartbeat.put(("diagnost_control", "AWAITING"))
 
     def control_disable(self):
-        self.heartbeat.put(("diagnost_control","FINISHED"))
+        self.heartbeat.put(("diagnost_control", "FINISHED"))
         self.heartbeat.put(("surgeon_control", "FINISHED"))
 
     def control_stop(self):
@@ -1038,9 +1058,14 @@ class RobotControlUI(ctk.CTk):
         diag_recv = None
         hirurg_recv = None
 
+        # Подключение к лазерным датчикам
+        self.laser_connected = self.laser_client.connect()
+        if self.laser_connected:
+            self.laser_client.start_stream()
+
         while not self.monitor_stop_event.is_set():
             try:
-                # Используем ТОЛЬКО RTDEReceiveInterface, так как ControlInterface нужен для управления джойстиком
+                # === Чтение данных с роботов ===
                 if diag_recv is None or not diag_recv.isConnected():
                     diag_recv = RTDEReceiveInterface("192.168.8.3")
                 if hirurg_recv is None or not hirurg_recv.isConnected():
@@ -1053,10 +1078,35 @@ class RobotControlUI(ctk.CTk):
                 diagnost_joints = diag_recv.getActualQ()
                 hirurg_joints = hirurg_recv.getActualQ()
 
+                # Обновление GUI - силы
                 if hasattr(self, 'diagnost_force_data_label'):
                     self.diagnost_force_data_label.config(
                         text=f'X:{diagnost_force[0]:.2f}, Y: {diagnost_force[1]:.2f}, Z: {diagnost_force[2]:.2f}')
 
+                # === Чтение данных с лазерных датчиков ===
+                if self.laser_connected:
+                    laser_data = self.laser_client.get_sensor_values()
+
+                    # Обновление GUI - лазерные датчики
+                    self.telemetry_vars['diag_las'].set(f"{laser_data['sensor_1']:.2f}")
+                    self.telemetry_vars['hir_las'].set(f"{laser_data['sensor_2']:.2f}")
+
+                    # Обновление статуса подключения лазеров
+                    if laser_data['status_1'] == 'ok':
+                        self.telemetry_vars['diag_status'].set("Подкл")
+                    else:
+                        self.telemetry_vars['diag_status'].set("Откл")
+
+                    if laser_data['status_2'] == 'ok':
+                        self.telemetry_vars['hir_status'].set("Подкл")
+                    else:
+                        self.telemetry_vars['hir_status'].set("Откл")
+
+                # Обновление GUI - силы роботов
+                self.telemetry_vars['diag_force'].set(f"{diagnost_force[2]:.2f}")
+                self.telemetry_vars['hir_force'].set(f"{hirurg_force[2]:.2f}")
+
+                # Логирование телеметрии в CSV
                 if self.telemetry_logger and getattr(self.telemetry_logger, 'enabled', False):
                     self.telemetry_logger.log_data(
                         ["диагност"] + list(diagnost_pose[:3]) + list(diagnost_joints) + list(diagnost_force))
@@ -1066,25 +1116,36 @@ class RobotControlUI(ctk.CTk):
                 time.sleep(1)
 
             except Exception as e:
-                logger.warning(f"system_monitor: Ошибка подключения или чтения данных ({e}). Повтор через 3 сек...")
-                # Безопасное отключение перед повторной попыткой
+                # При ошибке просто пробуем reconnect
                 if diag_recv:
-                    try: diag_recv.disconnect()
-                    except: pass
+                    try:
+                        diag_recv.disconnect()
+                    except:
+                        pass
                 if hirurg_recv:
-                    try: hirurg_recv.disconnect()
-                    except: pass
+                    try:
+                        hirurg_recv.disconnect()
+                    except:
+                        pass
                 diag_recv = None
                 hirurg_recv = None
                 time.sleep(3)
 
-        # Корректное отключение при остановке потока
+        # Очистка при завершении
         if diag_recv:
-            try: diag_recv.disconnect()
-            except: pass
+            try:
+                diag_recv.disconnect()
+            except:
+                pass
         if hirurg_recv:
-            try: hirurg_recv.disconnect()
-            except: pass
+            try:
+                hirurg_recv.disconnect()
+            except:
+                pass
+
+        # Отключение лазерных датчиков
+        if self.laser_client:
+            self.laser_client.disconnect()
 
     def watchdog(self):
         logger.debug("Запущен цикл мониторинга сердцебиения")
@@ -1253,6 +1314,10 @@ class RobotControlUI(ctk.CTk):
 
 def on_closing():
     logger.info("Получен сигнал закрытия приложения")
+    # Остановка лазерных датчиков
+    if hasattr(app, 'laser_client') and app.laser_client:
+        app.laser_client.disconnect()
+
     for name in list(app.processes.keys()):
         proc_data = app.processes.get(name)
         if proc_data and proc_data["process"] is not None and proc_data["process"].is_alive():
@@ -1260,6 +1325,7 @@ def on_closing():
             proc_data["process"].join(timeout=2.0)
     logger.info("Все процессы остановлены. Завершение работы.")
     app.destroy()
+
 
 if __name__ == '__main__':
     logger = setup_status_logging()

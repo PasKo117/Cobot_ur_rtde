@@ -92,8 +92,8 @@ class Robot:
         self.main_loop()
 
     def get_speeds(self):
-        linear_vel = 0.05  # 5 см/сек
-        rot_vel = 0.2     # рад/сек
+        linear_vel = 0.02  # 2 см/сек
+        rot_vel = 0.15     # рад/сек
         speeds = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         dz = getattr(self, 'deadzone', 0.3) # Мёртвая зона
 
