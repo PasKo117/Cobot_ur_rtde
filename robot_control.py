@@ -24,19 +24,17 @@ class Robot:
         self.path = []
         self.last_heartbeat = time.time()
 
-        # Интерфейсы
         self.ctrl = None
         self.recv = None
         self.slave_ctrl = None
         self.slave_recv = None
         self.joystick = None
-        self.deadzone = 0.2
+        self.deadzone = 0.25  # УВЕЛИЧЕНО для надёжного отсечения дрифта
 
     def init_robot(self):
         self.logger.debug(f"Инициализация робота IP: {self.IP} (is_master={self.is_master})...")
         try:
             if self.is_master:
-                # МАСТЕР: Создает интерфейсы управления и чтения для себя и для слейва
                 self.logger.debug(f"Создание RTDEControlInterface для мастера {self.IP}...")
                 self.ctrl = RTDEControlInterface(self.IP)
                 if not self.ctrl.isConnected():
@@ -52,7 +50,6 @@ class Robot:
                     self.slave_recv = RTDEReceiveInterface(self.slave_IP)
                     self.logger.info(f"Успешное подключение к слейву IP: {self.slave_IP}")
             else:
-                # СЛЕЙВ-ПРОЦЕСС: Создает ТОЛЬКО ReceiveInterface, чтобы не занимать регистры управления!
                 self.logger.debug(
                     f"Создание ТОЛЬКО RTDEReceiveInterface для слейв-процесса {self.IP} (чтение данных)...")
                 self.recv = RTDEReceiveInterface(self.IP)
@@ -65,6 +62,7 @@ class Robot:
 
     def init_joystick(self):
         pygame.init()
+        pygame.event.pump()
         joystick_count = pygame.joystick.get_count()
         self.logger.info(f"=== Pygame обнаружил джойстиков: {joystick_count} ===")
 
@@ -79,12 +77,9 @@ class Robot:
         if joystick_id < joystick_count:
             self.joystick = pygame.joystick.Joystick(joystick_id)
             self.joystick.init()
-            self.logger.info(
-                f"✅ Успешно инициализирован джойстик ID={joystick_id} для процесса {'МАСТЕР' if self.is_master else 'СЛЕЙВ'}")
+            self.logger.info(f"✅ Успешно инициализирован джойстик ID={joystick_id}")
         else:
-            self.logger.error(f"❌ ОШИБКА: Джойстик с ID={joystick_id} не найден! Доступно только {joystick_count} шт.")
-
-        self.deadzone = 0.15
+            self.logger.error(f"❌ ОШИБКА: Джойстик с ID={joystick_id} не найден!")
 
     def start_robot(self):
         self.init_joystick()
@@ -92,65 +87,62 @@ class Robot:
         self.main_loop()
 
     def get_speeds(self):
-        linear_vel = 0.02  # 2 см/сек
-        rot_vel = 0.15     # рад/сек
-        speeds = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        dz = getattr(self, 'deadzone', 0.3) # Мёртвая зона
+        pygame.event.pump()
 
-        # === ЧТЕНИЕ ОСЕЙ ПО ВАШЕЙ СХЕМЕ ===
-        axis0 = float(self.joystick.get_axis(0))
-        axis1 = float(self.joystick.get_axis(1))
-        axis2 = float(self.joystick.get_axis(2))
-        axis3 = float(self.joystick.get_axis(3))
-        but4 = float(self.joystick.get_button(3))
-        but6 = float(self.joystick.get_button(5))
+        linear_vel = 0.05
+        rot_vel = 0.07
+        dz = self.deadzone
+
+        def apply_dz(val):
+            return val if abs(val) > dz else 0.0
+
+        # Читаем ВСЕ доступные оси, чтобы найти рабочую
+        axes = [apply_dz(float(self.joystick.get_axis(i))) for i in range(self.joystick.get_numaxes())]
+
         hat = self.joystick.get_hat(0)
+        hat_x = float(hat[1]) if hat is not None else 0.0
+        hat_y = float(hat[0]) if hat is not None else 0.0
 
-        # === DEADMAN SWITCH (Курок - кнопка 0) ===
-        trigger_pressed = (self.joystick.get_button(0) == 1)
+        btn5 = self.joystick.get_button(4)
+        btn3 = self.joystick.get_button(2)
+        use_tool_frame = (self.joystick.get_button(0) == 1)
 
-        if trigger_pressed:
+        speeds = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-            # 1. Крестовина -> XY
-            if hat is not None:
-                speeds[0] = float(hat[1]) * linear_vel * (-1)  # Вверх/вниз крестовины -> X
-                speeds[1] = float(hat[0]) * linear_vel  # Влево/вправо крестовины -> Y
+        # 1. Линейные X, Y от крестовины
+        speeds[0] = hat_x * -linear_vel
+        speeds[1] = hat_y * -linear_vel
 
-            # Вспомогательная функция для применения мёртвой зоны вокруг нуля
-            def apply_dz(val):
-                return val if abs(val) > dz else 0.0
+        # 2. Линейная Z от кнопок 2 и 3
+        if btn5 == 1 and btn3 == 0:
+            speeds[2] = linear_vel
+        elif btn3 == 1 and btn5 == 0:
+            speeds[2] = -linear_vel
+        else:
+            speeds[2] = 0.0
 
-            # 2. повороты
-            speeds[3] = apply_dz(axis0) * rot_vel   #X
-            speeds[4] = apply_dz(axis1) * rot_vel   #Y
-            speeds[5] = apply_dz(axis2) * rot_vel * (-1)  #Z
+        # 3. Угловые скорости (ВНИМАНИЕ: Настройте индексы осей под ваш джойстик!)
+        # По логам, ось 3 у вас сломана/залипла на -1.0. Мы временно используем ось 2 для Rz.
+        # Если ось 2 тоже не та, посмотрите в консоль ниже и поменяйте цифры.
+        speeds[3] = axes[1] * - rot_vel  # Rx (обычно левый стик Y)
+        speeds[4] = axes[0] * rot_vel  # Ry (обычно левый стик X)
+        speeds[5] = axes[2] * - rot_vel  # Rz (ВРЕМЕННО ось 2, так как ось 3 залипла)
 
-            # 4. Z (Ось 3 - Вверх/Вниз)
-            if  but4 == 1:
-                speeds[2] = -linear_vel
-            elif but6 == 1:
-                speeds[2] = linear_vel
-            else:
-                speeds[2] = 0.0
-
-
-
-        # === ДЕТАЛЬНАЯ ТЕЛЕМЕТРИЯ ===
-        if not hasattr(self, 'last_telemetry'):
-            self.last_telemetry = 0
-
-        if time.time() - self.last_telemetry > 1.0:
-            joy_id = self.joystick.get_id()
-            print("\n" + "=" * 70)
-            print(f"ДЖОЙСТИК ID: {joy_id} | Процесс: {'МАСТЕР' if self.is_master else 'СЛЕЙВ'}")
-            print(f"Сырые оси:   X(0)={axis0:6.3f} | Y(1)={axis1:6.3f} | Rz(2)={axis2:6.3f} | Z(3)={axis3:6.3f}")
-            print(f"Курок (Кн.0): {'ЗАЖАТ' if trigger_pressed else 'ОТПУЩЕН'}")
-            print(f"Скорости [X, Y, Z, Rx, Ry, Rz]:")
-            print(f"   [{speeds[0]:6.3f}, {speeds[1]:6.3f}, {speeds[2]:6.3f}, {speeds[3]:6.3f}, {speeds[4]:6.3f}, {speeds[5]:6.3f}]")
-            print("=" * 70 + "\n")
+        # === ПОЛНАЯ ДИАГНОСТИКА ОСЕЙ ===
+        if not hasattr(self, 'last_telemetry') or time.time() - self.last_telemetry > 1.0:
+            print("\n" + "=" * 90)
+            print(f"ДЖОЙСТИК | Режим: {'ИНСТРУМЕНТ' if use_tool_frame else 'БАЗА'}")
+            print(
+                f"ВСЕ ОСИ (сырые): 0:{axes[0]:5.2f} | 1:{axes[1]:5.2f} | 2:{axes[2]:5.2f} | 3:{axes[3] if len(axes) > 3 else 0.0:5.2f} | 4:{axes[4] if len(axes) > 4 else 0.0:5.2f} | 5:{axes[5] if len(axes) > 5 else 0.0:5.2f}")
+            print(
+                f"Крестовина: X={hat_x:2.0f} | Y={hat_y:2.0f} | Кнопки: 2={btn5} | 3={btn3} | Курок(0)={self.joystick.get_button(0)}")
+            print(f"ИТОГОВЫЕ СКОРОСТИ [X, Y, Z, Rx, Ry, Rz]:")
+            print(
+                f"   [{speeds[0]:6.3f}, {speeds[1]:6.3f}, {speeds[2]:6.3f}, {speeds[3]:6.3f}, {speeds[4]:6.3f}, {speeds[5]:6.3f}]")
+            print("=" * 90 + "\n")
             self.last_telemetry = time.time()
 
-        return [float(x) for x in speeds]
+        return speeds, use_tool_frame
 
     def update_heartbeat(self):
         current_time = time.time()
@@ -158,36 +150,35 @@ class Robot:
             self.heartbeat.put((mp.current_process().name, "ALIVE", time.time()))
             self.last_heartbeat = current_time
 
-    def _pose_to_matrix(self, pose):
-        x, y, z, rx, ry, rz = pose
+    def _get_rotation_matrix(self, pose):
+        rx, ry, rz = pose[3], pose[4], pose[5]
         theta = math.sqrt(rx ** 2 + ry ** 2 + rz ** 2)
         if theta < 1e-6:
-            return [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, z], [0.0, 0.0, 0.0, 1.0]]
+            return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
         ux, uy, uz = rx / theta, ry / theta, rz / theta
         c, s, t = math.cos(theta), math.sin(theta), 1.0 - math.cos(theta)
         return [
-            [t * ux * ux + c, t * ux * uy - s * uz, t * ux * uz + s * uy, x],
-            [t * ux * uy + s * uz, t * uy * uy + c, t * uy * uz - s * ux, y],
-            [t * ux * uz - s * uy, t * uy * uz + s * ux, t * uz * uz + c, z],
-            [0.0, 0.0, 0.0, 1.0]
+            [t * ux * ux + c, t * ux * uy - s * uz, t * ux * uz + s * uy],
+            [t * ux * uy + s * uz, t * uy * uy + c, t * uy * uz - s * ux],
+            [t * ux * uz - s * uy, t * uy * uz + s * ux, t * uz * uz + c]
         ]
+
+    def transform_tool_to_base_velocity(self, v_tool, current_pose):
+        R = self._get_rotation_matrix(current_pose)
+        v_lin_tool, v_ang_tool = v_tool[:3], v_tool[3:]
+        v_lin_base = [sum(R[i][j] * v_lin_tool[j] for j in range(3)) for i in range(3)]
+        v_ang_base = [sum(R[i][j] * v_ang_tool[j] for j in range(3)) for i in range(3)]
+        return v_lin_base + v_ang_base
 
     def get_slave_speeds(self):
         if not self.is_master or not self.slave_recv:
             return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-
-        T = self._pose_to_matrix(self.recv.getActualTCPPose())
-        z1, z2 = float(-T[0][2]), float(-T[1][2])
-        yx, yy = float(T[0][1]), float(-T[1][1])
-        xx, xy = float(T[0][0]), float(-T[1][0])
-
-        s0, s1, s2 = float(self.speeds[0]), float(self.speeds[1]), float(self.speeds[2])
-
-        return [
-            float(s2 * z1 + s0 * xx + s1 * yx),
-            float(s2 * z2 + s0 * xy + s1 * yy),
-            0.0, 0.0, 0.0, 0.0
-        ]
+        T = self._get_rotation_matrix(self.recv.getActualTCPPose())
+        xx, xy = T[0][0], T[0][1]
+        yx, yy = T[0][1], -T[1][1]
+        z1, z2 = -T[0][2], -T[1][2]
+        s0, s1, s2 = float(self.speeds_raw[0]), float(self.speeds_raw[1]), float(self.speeds_raw[2])
+        return [float(s2 * z1 + s0 * xx + s1 * yx), float(s2 * z2 + s0 * xy + s1 * yy), 0.0, 0.0, 0.0, 0.0]
 
     def main_loop(self):
         self.running = True
@@ -198,53 +189,51 @@ class Robot:
         while self.running:
             self.update_heartbeat()
 
-            # Если это не мастер, он просто ждет и шлет heartbeat (данные читаются системой мониторинга из app.py)
             if not self.is_master:
                 time.sleep(0.1)
                 continue
 
-            # Логика мастера
             if self.lock.value:
                 if not stop:
                     self.ctrl.stopScript()
-                    if self.slave_ctrl:
-                        self.slave_ctrl.stopScript()
+                    if self.slave_ctrl: self.slave_ctrl.stopScript()
                     stop = True
                 time.sleep(0.1)
                 continue
             stop = False
 
             pygame.event.pump()
-            self.pos = self.recv.getActualTCPPose()
+            current_pose = self.recv.getActualTCPPose()
             if self.slave_recv:
                 self.slave_pos = self.slave_recv.getActualTCPPose()
 
-            self.speeds = self.get_speeds()
+            self.speeds_raw, use_tool_frame = self.get_speeds()
 
-            # Дополнительная страховка прямо перед вызовом
-            self.speeds = [float(x) for x in self.speeds]
+            if use_tool_frame:
+                final_speeds = self.transform_tool_to_base_velocity(self.speeds_raw, current_pose)
+            else:
+                final_speeds = self.speeds_raw
 
+            final_speeds = [float(x) for x in final_speeds]
 
             try:
-                # Движение мастера (ЗАМЕНЕНО time=0.0 НА time=0.0)
-                self.ctrl.speedL(self.speeds, acceleration=0.1, time=0.0)
-
-                # Движение слейва (если мастер и есть слейв)
+                self.ctrl.speedL(final_speeds, acceleration=0.1, time=0.0)
                 if self.slave_ctrl:
                     if self.auto.value:
                         slave_speeds = self.get_slave_speeds()
-                        slave_speeds = [float(x) for x in slave_speeds]
-                        self.slave_ctrl.speedL(slave_speeds, acceleration=0.1, time=0.0)
+                        self.slave_ctrl.speedL([float(x) for x in slave_speeds], acceleration=0.1, time=0.0)
                     else:
-                        # В асинхронном режиме останавливаем слейв
                         self.slave_ctrl.speedL([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], acceleration=0.1, time=0.0)
             except Exception as e:
                 error_msg = f"{type(e).__name__}:{str(e)}"
-                self.logger.error(f"Ошибка при работе с роботом IP: {self.IP}, сообщение: {error_msg}")
+                self.logger.error(f"ОШИБКА (ВОЗМОЖНО, АВАРИЯ НА ПУЛЬТЕ!): {error_msg}")
+                self.logger.error(">>> СБРОСЬТЕ АВАРИЮ (Protective Stop) НА ФИЗИЧЕСКОМ ПУЛЬТЕ РОБОТА! <<<")
                 self.heartbeat.put((mp.current_process().name, "ERROR", error_msg, time.time()))
-                break
+                # Не делаем break, чтобы процесс не падал, но и не спамим командами
+                time.sleep(1.0)
+                continue
 
-            # Переключение режимов (только мастер)
+            # Управление режимами
             if self.joystick.get_button(6) and not self.joystick.get_button(7) and self.auto.value == 0:
                 self.auto.value = 1
                 self.logger.info("Система переведена в СИНХРОННЫЙ режим")
@@ -252,37 +241,32 @@ class Robot:
                 self.auto.value = 0
                 self.logger.info("Система переведена в АСИНХРОННЫЙ режим")
 
-            # Возврат слейва в исходную (кнопка 8)
             if self.joystick.get_button(8) and self.auto.value == 0 and self.slave_ctrl:
                 self.logger.info("Возврат слейва в исходную позицию")
                 self.slave_ctrl.moveL(
                     (float(self.slave_pos[0]), float(self.slave_pos[1]), float(self.slave_pos[2]), 0.0, 3.14, 0.0),
-                    speed=0.2, acceleration=0.2
-                )
+                    speed=0.2, acceleration=0.2)
 
-            # Запись пути (кнопка 10)
             if self.joystick.get_button(10):
-                path.append(list(self.recv.getActualTCPPose()))  # Сохраняем как список float
+                path.append(list(current_pose))
 
-            # Воспроизведение пути (кнопка 11)
             if self.joystick.get_button(11) and len(path) > 0:
                 self.logger.info(f"Воспроизведение пути из {len(path)} точек")
                 for pose in path:
                     self.ctrl.moveL(pose, speed=0.2, acceleration=0.2)
                     while self.ctrl.isProgramRunning():
                         pygame.event.pump()
-                        if self.joystick.get_button(11):  # Повторное нажатие отменяет
+                        if self.joystick.get_button(11):
                             self.ctrl.stopScript()
                             break
                         time.sleep(0.01)
-                path = []  # Очистить после выполнения
+                path = []
 
-            # Сохранение пути в общую память (кнопка 9)
             if self.joystick.get_button(9) and len(path) > 0:
                 self.shared_path[0] = deepcopy(path)
                 self.logger.info(f"Путь сохранен в общую память. Точек: {len(path)}")
                 path = []
-                time.sleep(1.0)  # Защита от дребезга кнопки
+                time.sleep(1.0)
 
             time.sleep(0.01)
 
@@ -290,8 +274,7 @@ class Robot:
 
     def close(self):
         self.logger.info(f"Завершение работы и отключение от робота {self.IP}")
-        if self.joystick:
-            self.joystick.quit()
+        if self.joystick: self.joystick.quit()
         if self.ctrl:
             try:
                 self.ctrl.disconnect()
@@ -321,18 +304,13 @@ def main(IP, is_master, auto, lock, shared_path, heartbeat, slave_IP=None):
     if not proc_logger.handlers:
         formatter = logging.Formatter(
             fmt='%(asctime)s.%(msecs)03d | %(levelname)-8s | %(processName)-15s | %(threadName)-15s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+            datefmt='%Y-%m-%d %H:%M:%S')
         file_handler = RotatingFileHandler(
-            filename=f'logs/processes_status_log_{datetime.now().strftime("%Y-%m-%d")}.log',
-            maxBytes=10 * 1024 * 1024,
-            backupCount=5,
-            encoding='utf-8'
-        )
+            filename=f'logs/processes_status_log_{datetime.now().strftime("%Y-%m-%d")}.log', maxBytes=10 * 1024 * 1024,
+            backupCount=5, encoding='utf-8')
         file_handler.setFormatter(formatter)
         proc_logger.addHandler(file_handler)
 
     proc_logger.info(f"Запуск рабочего процесса | PID: {os.getpid()}")
-
     robot = Robot(IP, is_master, proc_logger, auto, lock, shared_path, heartbeat, slave_IP)
     robot.start_robot()

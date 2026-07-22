@@ -449,6 +449,11 @@ class RobotControlUI(ctk.CTk):
         self.monitor = Thread(target=self.system_monitor, daemon=True)
         self.monitor.start()
 
+
+
+
+
+
         self.watchdog_thread = Thread(target=self.watchdog, daemon=True, name="Watchdog")
         self.watchdog_thread.start()
         logger.info(f"Запущен фоновый монитор сердцебиения (поток: {self.watchdog_thread.name})")
