@@ -1,188 +1,39 @@
+"""GUI for the two UR robots. RTDE access is owned by robot_control.py."""
+import csv
+import math
+import multiprocessing as mp
+import socket
+import subprocess
+import sys
+import threading
+import time
 import tkinter as tk
-# import tkinter.messagebox as mb
-# from tkinter import ttk
+from datetime import datetime
+from pathlib import Path
+from queue import Empty
+from threading import Thread
 from tkinter import filedialog
 
 import customtkinter as ctk
-# import CTkFileDialog as filedialog
 from CTkMessagebox import CTkMessagebox as mb
 
-import sys
-
-import robot_control
-
-print(sys.version)
-
-import subprocess
-import socket
-import signal
-import os
-from time import sleep
-import time
-from datetime import datetime
-from ur_rtde import RTDEControlInterface, RTDEReceiveInterface
-import asyncio
-from threading import Thread
-import threading
-import multiprocessing as mp
-import math
-import asyncio
-from pathlib import Path
-import logging
-from logging.handlers import RotatingFileHandler
-import csv
-
-import Align_D
-import Align_H
-import Power_On_H
-import camDiagn
-import camHirurg
-import ESTOP_RESET_D
-import ESTOP_RESET_H
-import Joystick_diagnost
-import Joystick_hirurg
-import Power_On_D
-import Power_Off_H
-import Power_Off_D
 import robot_control
 from laser_sensor_lib import LaserSensorClient
 
-rob_us_data = []
-us_lock = False
-stop_route = threading.Event()
-starting_pose = []
-
-auto = mp.Value("i", 1)
-force_lock = mp.Value("i", 0)
-control_lock = mp.Value("i", 0)
-program_lock = mp.Value("i", 0)
-
-# Настройки внешнего вида
-ctk.set_appearance_mode("Dark")  # Темы: "Dark", "Light", "System"
-ctk.set_default_color_theme("blue")  # Темы: "blue", "green", "dark-blue"
-
-
-def setup_status_logging(log_dir="logs", max_bytes=10 * 1024 * 1024, backup_count=5):
-    log_dir = Path(log_dir)
-    log_dir.mkdir(exist_ok=True)
-
-    log_file = log_dir / f'processes_status_log_{datetime.now().strftime("%Y-%m-%d")}.log'
-
-    logger = logging.getLogger("ProcessStatus")
-    logger.setLevel(logging.DEBUG)
-
-    if logger.handlers:
-        return logger
-
-    formatter = logging.Formatter(
-        fmt='%(asctime)s.%(msecs)03d | %(levelname)-8s | %(processName)-15s | %(threadName)-15s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-
-    file_handler = RotatingFileHandler(
-        filename=log_file,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding='utf-8'
-    )
-
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-
-    logger.info("=" * 80)
-    logger.info(f'ЗАПУСК ЕППУИХ | PID: {os.getpid()}')
-    logger.info("=" * 80)
-
-    return logger
-
-
-def _pose_to_matrix(pose):
-    x, y, z, rx, ry, rz = pose
-    theta = math.sqrt(rx ** 2 + ry ** 2 + rz ** 2)
-    if theta < 1e-6:
-        return [[1, 0, 0, x], [0, 1, 0, y], [0, 0, 1, z], [0, 0, 0, 1]]
-    ux, uy, uz = rx / theta, ry / theta, rz / theta
-    c = math.cos(theta)
-    s = math.sin(theta)
-    t = 1 - c
-    return [
-        [t * ux * ux + c, t * ux * uy - s * uz, t * ux * uz + s * uy, x],
-        [t * ux * uy + s * uz, t * uy * uy + c, t * uy * uz - s * ux, y],
-        [t * ux * uz - s * uy, t * uy * uz + s * ux, t * uz * uz + c, z],
-        [0, 0, 0, 1]
-    ]
-
-
-def _matrix_to_pose(T):
-    x, y, z = T[0][3], T[1][3], T[2][3]
-    R = [[T[0][0], T[0][1], T[0][2]],
-         [T[1][0], T[1][1], T[1][2]],
-         [T[2][0], T[2][1], T[2][2]]]
-    theta = math.acos(max(-1.0, min(1.0, (R[0][0] + R[1][1] + R[2][2] - 1) / 2)))
-    if theta < 1e-6:
-        rx, ry, rz = 0.0, 0.0, 0.0
-    else:
-        rx = (R[2][1] - R[1][2]) / (2 * math.sin(theta)) * theta
-        ry = (R[0][2] - R[2][0]) / (2 * math.sin(theta)) * theta
-        rz = (R[1][0] - R[0][1]) / (2 * math.sin(theta)) * theta
-    return [x, y, z, rx, ry, rz]
-
-
-def _multiply_matrices(A, B):
-    return [[sum(a * b for a, b in zip(A_row, B_col)) for B_col in zip(*B)] for A_row in A]
-
-
-def translate_base(ctrl, recv, dx, dy, dz, vel, acc):
-    pose = recv.getActualTCPPose()
-    pose[0] += dx
-    pose[1] += dy
-    pose[2] += dz
-    ctrl.moveL(pose, speed=vel, acceleration=acc)
-
-
-def translate_tool(ctrl, recv, dx, dy, dz, vel, acc):
-    pose = recv.getActualTCPPose()
-    T = _pose_to_matrix(pose)
-    delta_T = [[1, 0, 0, dx], [0, 1, 0, dy], [0, 0, 1, dz], [0, 0, 0, 1]]
-    T_new = _multiply_matrices(T, delta_T)
-    new_pose = _matrix_to_pose(T_new)
-    ctrl.moveL(new_pose, speed=vel, acceleration=acc)
-
-
-def rotate_tool_x(ctrl, recv, angle_rad, vel, acc):
-    pose = recv.getActualTCPPose()
-    T = _pose_to_matrix(pose)
-    T_rot = [
-        [1, 0, 0, 0],
-        [0, math.cos(angle_rad), -math.sin(angle_rad), 0],
-        [0, math.sin(angle_rad), math.cos(angle_rad), 0],
-        [0, 0, 0, 1]
-    ]
-    T_new = _multiply_matrices(T, T_rot)
-    new_pose = _matrix_to_pose(T_new)
-    ctrl.moveL(new_pose, speed=vel, acceleration=acc)
+ctk.set_appearance_mode('Dark')
+ctk.set_default_color_theme('blue')
 
 
 class CSVLogger:
-    def __init__(self, filename="logs/telemetry_log.csv"):
-        self.filename = filename
+    def __init__(self, filename='logs/telemetry_log.csv'):
+        self.filename = Path(filename)
+        self.filename.parent.mkdir(parents=True, exist_ok=True)
         self.enabled = False
-        self._ensure_header()
-
-    def _ensure_header(self):
-        if not os.path.exists(self.filename):
-            with open(self.filename, "w", newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(
-                    ["timestamp", "robot", "temperature", "X", "Y", "Z", "J1", "J2", "J3", "J4", "J5", "J6", "FX", "FY",
-                     "FZ", "MX", "MY", "MZ"])
+        if not self.filename.exists():
+            with self.filename.open('w', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow(['timestamp', 'robot', 'X', 'Y', 'Z',
+                                        'J1', 'J2', 'J3', 'J4', 'J5', 'J6',
+                                        'FX', 'FY', 'FZ', 'MX', 'MY', 'MZ'])
 
     def enable(self):
         self.enabled = True
@@ -190,213 +41,22 @@ class CSVLogger:
     def disable(self):
         self.enabled = False
 
-    def log_data(self, data):
-        if not self.enabled:
-            return
-
-        try:
-            timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
-            with open(self.filename, "a", newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([timestamp] + [data])
-        except Exception as e:
-            logger.error(f'Ошибка логгирования телеметрии: {type(e).__name__}:{str(e)[:100]}')
+    def log_data(self, name, sample):
+        if self.enabled:
+            with self.filename.open('a', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow([datetime.now().isoformat(timespec='milliseconds'), name,
+                                        *sample['pose'][:3], *sample['joints'], *sample['force']])
 
 
-def force_control(threshold):
-    ctrl = RTDEControlInterface("192.168.8.3")
-    recv = RTDEReceiveInterface("192.168.8.3")
-    global stop_route
-    while True:
-        forces = recv.getActualTCPForce()
-        if forces[2] > threshold:
-            force_lock.value = 1
-            ctrl.speedToolL([0.0] * 6, acceleration=0.5, time=0.0)
-            stop_route.set()
-            time.sleep(1)
-            translate_tool(ctrl, recv, 0, 0, -0.1, 0.5, 0.5)
-            while ctrl.isProgramRunning():
-                time.sleep(0.01)
-            time.sleep(10)
-            force_lock.value = 0
-        else:
-            force_lock.value = 0
-        time.sleep(0.05)
-
-
-def route_follow(nsteps, S, pause_time, vel):
-    ctrl = RTDEControlInterface("192.168.8.3")
-    recv = RTDEReceiveInterface("192.168.8.3")
-    global rob_us_data, us_lock, stop_route, starting_pose
-    force = [recv.getActualTCPForce()[2]]
-    t = [0]
-    coordinates = [0]
-    start = time.time()
-    us_lock = True
-    starting_pose = recv.getActualTCPPose()
-    for x in range(nsteps):
-        if stop_route.is_set():
-            stop_route.clear()
-            rob_us_data = [t, coordinates, force]
-            app.show_warning("Маршрут остановлен")
-            ctrl.disconnect()
-            recv.disconnect()
-            break
-
-        translate_base(ctrl, recv, S[0], 0, 0, vel, 0.1)  # Движение по X
-        while ctrl.isProgramRunning():
-            if stop_route.is_set():
-                stop_route.clear()
-                rob_us_data = [t, coordinates, force]
-                app.show_warning("Маршрут остановлен")
-                ctrl.disconnect()
-                recv.disconnect()
-                break
-            time.sleep(0.01)
-
-        translate_base(ctrl, recv, 0, S[1], 0, vel, 0.1)  # Движение по Y
-        while ctrl.isProgramRunning():
-            if stop_route.is_set():
-                stop_route.clear()
-                rob_us_data = [t, coordinates, force]
-                app.show_warning("Маршрут остановлен")
-                ctrl.disconnect()
-                recv.disconnect()
-                break
-            time.sleep(0.01)
-
-        translate_base(ctrl, recv, 0, 0, S[2], vel, 0.1)  # Движение по Z
-        while ctrl.isProgramRunning():
-            if stop_route.is_set():
-                stop_route.clear()
-                rob_us_data = [t, coordinates, force]
-                app.show_warning("Маршрут остановлен")
-                ctrl.disconnect()
-                recv.disconnect()
-                break
-            time.sleep(0.01)
-
-        t.append(time.time() - start)
-        time.sleep(pause_time)
-        coordinates.append(recv.getActualTCPPose())
-        force.append(recv.getActualTCPForce()[2])
-
-        if stop_route.is_set():
-            rob_us_data = [t, coordinates, force]
-            app.show_warning("Маршрут остановлен")
-            ctrl.disconnect()
-            recv.disconnect()
-            us_lock = False
-            stop_route.clear()
-            return
-    rob_us_data = [t, coordinates, force]
-
-    us_lock = False
-    ctrl.disconnect()
-    recv.disconnect()
-
-
-def aphi(angle, nsteps, step, pause_time, vel, tool_length=0.645):
-    global us_lock, stop_route
-
-    ctrl = RTDEControlInterface("192.168.8.4")
-    recv = RTDEReceiveInterface("192.168.8.4")
-
-    for s in range(nsteps):
-        translate_tool(ctrl, recv, 0, 0, -step, vel, 0.1)
-        while ctrl.isProgramRunning():
-            time.sleep(0.01)
-        time.sleep(pause_time)
-    while ctrl.isProgramRunning():
-        time.sleep(0.01)
-    us_lock = False
-    ctrl.disconnect()
-    recv.disconnect()
-
-
-def ashido_init(nsteps, step, angle=0, tool_length=0.645):
-    global us_lock
-    ctrl = RTDEControlInterface("192.168.8.4")
-    recv = RTDEReceiveInterface("192.168.8.4")
-    pose = recv.getActualTCPPose()
-    if angle != 0:
-        ctrl.moveL((pose[0], pose[1], pose[2], 3.14 / 2, 0, 0), speed=0.2, acceleration=0.2)
-        while ctrl.isProgramRunning():
-            time.sleep(0.01)
-
-    angle_rad = angle * (math.pi / 180)
-    r = tool_length + 0.195
-    h = r * math.sin(angle_rad) + 0.005
-    delta = r - r * math.cos(angle_rad)
-
-    translate_base(ctrl, recv, 0, 0, h, 0.5, 0.1)
-    while ctrl.isProgramRunning():
-        time.sleep(0.01)
-
-    translate_tool(ctrl, recv, 0, 0, delta, 0.1, 0.1)
-    while ctrl.isProgramRunning():
-        time.sleep(0.01)
-
-    rotate_tool_x(ctrl, recv, angle_rad, 0.1, 0.1)
-    while ctrl.isProgramRunning():
-        time.sleep(0.01)
-
-    translate_tool(ctrl, recv, 0, 0, nsteps * step, 0.1, 0.1)
-    while ctrl.isProgramRunning():
-        time.sleep(0.01)
-
-    us_lock = False
-    ctrl.disconnect()
-    recv.disconnect()
-    program_lock.value = 0
-
-
-async def ashido(nsteps, step, pause_time, vel, angle=0, is_hirurg=0, tool_length=0.645):
-    global rob_us_data, us_lock, stop_route
-    loop = asyncio.get_running_loop()
-
-    hirurg_ctrl = RTDEControlInterface("192.168.8.4")
-    hirurg_recv = RTDEReceiveInterface("192.168.8.4")
-    diag_ctrl = RTDEControlInterface("192.168.8.3")
-    diag_recv = RTDEReceiveInterface("192.168.8.3")
-
-    time.sleep(5)
-
-    if not (hirurg_ctrl.isConnected() and diag_ctrl.isConnected()):
-        hirurg_ctrl.disconnect();
-        hirurg_recv.disconnect()
-        diag_ctrl.disconnect();
-        diag_recv.disconnect()
-        return -1
-    if angle != 0:
-        dv = vel * math.cos(angle * math.pi / 180) if vel * math.cos(angle * math.pi / 180) >= 0.001 else 0.001
-        ds = step * math.cos(angle * math.pi / 180) if step * math.cos(angle * math.pi / 180) >= 0.001 else 0.001
-    else:
-        dv = vel
-        ds = step
-
-    t = [0]
-    coordinates = [0]
-    start = time.time()
-    us_lock = True
-    starting_pose = diag_recv.getActualTCPPose()
-
-    for s in range(nsteps):
-        await loop.run_in_executor(None, translate_tool, hirurg_ctrl, hirurg_recv, 0, 0, -step, vel, vel)
-        await loop.run_in_executor(None, translate_base, diag_ctrl, diag_recv, 0, -ds, 0, dv, dv)
-        while hirurg_ctrl.isProgramRunning() or diag_ctrl.isProgramRunning():
-            await asyncio.sleep(0.01)
-
-        t.append(time.time() - start)
-        coordinates.append(diag_recv.getActualTCPPose())
-
-    rob_us_data = [t, coordinates]
-    us_lock = False
-    hirurg_ctrl.disconnect()
-    hirurg_recv.disconnect()
-    diag_ctrl.disconnect()
-    diag_recv.disconnect()
-    program_lock.value = 0
+def dashboard_command(ip, command):
+    with socket.create_connection((ip, 29999), timeout=5) as connection:
+        connection.settimeout(5)
+        connection.recv(4096)  # Dashboard sends a greeting before receiving commands.
+        connection.sendall((command + '\n').encode('ascii'))
+        answer = connection.recv(4096).decode(errors='replace').strip()
+        if not answer or 'failed' in answer.lower() or 'not allowed' in answer.lower():
+            raise RuntimeError(f'{ip}: {command}: {answer}')
+        return answer
 
 
 class RobotControlUI(ctk.CTk):
@@ -409,16 +69,10 @@ class RobotControlUI(ctk.CTk):
         self.minsize(900, 650)
 
         # Переменные системы
-        self.threads = []
-        self.processes = {}
         self.heartbeat = mp.Queue()
-        self.heartbeat_timeout = 10.0
-        self.restart_delays = {}
         self.tel_logging_var = ctk.BooleanVar(value=False)
 
-        self.ppui_stop_event = threading.Event()
         self.monitor_stop_event = threading.Event()
-        self.watchdog_stop_event = threading.Event()
 
         self.surgeon_ip = "192.168.8.4"
         self.diagnost_ip = "192.168.8.3"
@@ -441,25 +95,25 @@ class RobotControlUI(ctk.CTk):
         )
         self.laser_connected = False
 
-        self.telemetry_logger = None
-
         # Создание интерфейса
         self.create_tabs()
 
+        self.commands = mp.Queue()
+        self.messages = mp.Queue()
+        self.stop_motion = mp.Event()
+        self.shutdown = mp.Event()
+        self.worker = None
+        self.busy = False
+        self.manual = False
+        self.route_data = []
+        self.aphi_data = []
+        self.paths = {'diagnost': [], 'surgeon': []}
+        self.start_pose = None
+        self.camera_processes = {}
+        self.telemetry_logger = CSVLogger()
+        self.after(100, self.poll_worker)
         self.monitor = Thread(target=self.system_monitor, daemon=True)
         self.monitor.start()
-
-
-
-
-
-
-        self.watchdog_thread = Thread(target=self.watchdog, daemon=True, name="Watchdog")
-        self.watchdog_thread.start()
-        logger.info(f"Запущен фоновый монитор сердцебиения (поток: {self.watchdog_thread.name})")
-
-        # self.force_control_thread = Thread(target=force_control, args = (17,))
-        # self.force_control_thread.start()
 
     def create_tabs(self):
         """Создание вкладок"""
@@ -512,7 +166,7 @@ class RobotControlUI(ctk.CTk):
         self.control_initiate_btn.grid(column=0, row=2, padx=10, pady=5, sticky="ew")
 
         self.control_disable_btn = ctk.CTkButton(left_frame, text='Отключить контроллеры',
-                                                 command=self.control_initiate, state="disabled", fg_color="#E74C3C",
+                                                 command=self.control_disable, state="disabled", fg_color="#E74C3C",
                                                  hover_color="#C0392B")
         self.control_disable_btn.grid(column=1, row=2, padx=10, pady=5, sticky="ew")
 
@@ -693,6 +347,8 @@ class RobotControlUI(ctk.CTk):
                                               fg_color="#2CC985", hover_color="#25A56E", width=300, height=50,
                                               font=ctk.CTkFont(size=14, weight="bold"))
         self.ashido_start_btn.grid(column=0, row=2, pady=15)
+        ctk.CTkLabel(frame, text='Используются параметры вкладки «Воздействие».\n'
+                     'Доступно только осевое продвижение хирурга; угол должен быть 0.').grid(column=0, row=3, pady=10)
 
     def create_cam_tab(self):
         """Вкладка Камеры"""
@@ -777,570 +433,318 @@ class RobotControlUI(ctk.CTk):
     def toggle_telemetry_logging(self):
         if self.tel_logging_var.get():
             self.telemetry_logger.enable()
-            self.telemetry_logging_status_label.config(text="Логирование: ВКЛЮЧЕНО", foreground="green")
         else:
             self.telemetry_logger.disable()
-            self.telemetry_logging_status_label.config(text="Логирование: ВЫКЛЮЧЕНО", foreground="red")
+        self.telemetry_logging_status_label.configure(
+            text='Логирование: ВКЛЮЧЕНО' if self.tel_logging_var.get() else 'Логирование: ВЫКЛЮЧЕНО',
+            text_color='green' if self.tel_logging_var.get() else 'red')
 
     def system_launch(self):
-        self.system_launch_btn.configure(state=ctk.DISABLED)
-        self.system_stop_btn.configure(state=ctk.NORMAL)
-        self.control_launch_btn.configure(state=ctk.NORMAL)
-        self.align_btn.configure(state=ctk.NORMAL)
-        params = (self.heartbeat,)
-
-        self.processes['power_on_surgeon'] = {
-            'process': mp.Process(target=Power_On_H.main, daemon=True, name='power_on_surgeon', args=params),
-            'last_heartbeat': time.time(),
-            'start_time': time.time(),
-            'params': params,
-            'state': 'AWAITING',
-            'pid': None,
-            'target': Power_On_H.main
-        }
-        self.heartbeat.put(('power_on_surgeon', "AWAITING"))
-
-        self.processes['power_on_diagnost'] = {
-            'process': mp.Process(target=Power_On_D.main, daemon=True, name='power_on_diagnost', args=params),
-            'last_heartbeat': time.time(),
-            'start_time': time.time(),
-            'params': params,
-            'state': 'AWAITING',
-            'pid': None,
-            'target': Power_On_D.main
-        }
-        self.heartbeat.put(('power_on_diagnost', "AWAITING"))
-
-        if not self.monitor.is_alive():
-            self.monitor.start()
+        self.system_launch_btn.configure(state='disabled')
+        def power_on():
+            try:
+                for ip in (self.surgeon_ip, self.diagnost_ip):
+                    dashboard_command(ip, 'power on')
+                time.sleep(5)
+                for ip in (self.surgeon_ip, self.diagnost_ip):
+                    dashboard_command(ip, 'brake release')
+                self.messages.put(('INFO', {'text': 'Роботы включены; проверьте состояние на пультах'}))
+            except Exception as exc:
+                self.messages.put(('ERROR', {'text': f'Включение питания: {exc}'}))
+            finally:
+                self.messages.put(('POWER_ON_DONE', {}))
+        threading.Thread(target=power_on, daemon=True).start()
 
     def system_stop(self):
-        print('system_stopped')
-        self.system_launch_btn.configure(state=ctk.NORMAL)
-        self.system_stop_btn.configure(state=ctk.DISABLED)
-        self.control_stop_btn.configure(state=ctk.DISABLED)
-        self.control_launch_btn.configure(state=ctk.DISABLED)
-        self.align_btn.configure(state=ctk.DISABLED)
-        params = (self.heartbeat,)
-
-        self.processes['power_off_surgeon'] = {
-            'process': mp.Process(target=Power_Off_H.main, daemon=True, name='power_off_surgeon', args=params),
-            'last_heartbeat': time.time(),
-            'start_time': time.time(),
-            'params': params,
-            'state': 'AWAITING',
-            'pid': None,
-            'target': Power_Off_H.main
-        }
-        self.heartbeat.put(('power_off_surgeon', 'AWAITING'))
-
-        self.processes['power_off_diagnost'] = {
-            'process': mp.Process(target=Power_Off_D.main, daemon=True, name='power_off_diagnost', args=params),
-            'last_heartbeat': time.time(),
-            'start_time': time.time(),
-            'params': params,
-            'state': 'AWAITING',
-            'pid': None,
-            'target': Power_Off_D.main
-        }
-        self.heartbeat.put(('power_off_diagnost', 'AWAITING'))
-
-    def control_launch(self):
-        global us_lock
-        sleep(1)
-        if us_lock:
-            program_lock.value = 0
-            self.control_stop_btn.configure(state=tk.NORMAL)
-            self.control_launch_btn.configure(state=tk.DISABLED)
-        else:
-            self.show_error("ППУИ запущено!")
+        self.control_disable()
+        def power_off():
+            for ip in (self.surgeon_ip, self.diagnost_ip):
+                try:
+                    dashboard_command(ip, 'power off')
+                except Exception as exc:
+                    self.messages.put(('ERROR', {'text': f'Выключение: {exc}'}))
+            self.messages.put(('POWER_OFF_DONE', {}))
+        threading.Thread(target=power_off, daemon=True).start()
 
     def control_initiate(self):
-        surgeon_params = (self.surgeon_ip, True, auto, program_lock, shared_path, self.heartbeat, self.diagnost_ip)
-        diagnost_params = (self.diagnost_ip, False, auto, program_lock, shared_path, self.heartbeat)
-
-        self.processes['surgeon_control'] = {
-            'process': mp.Process(target=robot_control.main, daemon=True, name='surgeon_control', args=surgeon_params),
-            'last_heartbeat': time.time(),
-            'start_time': time.time(),
-            'params': surgeon_params,
-            'state': 'AWAITING',
-            'pid': None,
-            'target': robot_control.main
-        }
-        self.heartbeat.put(("surgeon_control", "AWAITING"))
-        self.processes['diagnost_control'] = {
-            'process': mp.Process(target=robot_control.main, daemon=True, name='diagnost_control',
-                                  args=diagnost_params),
-            'last_heartbeat': time.time(),
-            'start_time': time.time(),
-            'params': diagnost_params,
-            'state': 'AWAITING',
-            'pid': None,
-            'target': robot_control.main
-        }
-        self.heartbeat.put(("diagnost_control", "AWAITING"))
+        if self.worker and self.worker.is_alive():
+            return
+        self.shutdown.clear()
+        self.stop_motion.clear()
+        self.worker = mp.Process(name='robot_worker', target=robot_control.main,
+                                 args=(self.commands, self.messages, self.stop_motion, self.shutdown,
+                                       self.heartbeat, self.diagnost_ip, self.surgeon_ip))
+        self.worker.start()
+        self.control_initiate_btn.configure(state='disabled')
 
     def control_disable(self):
-        self.heartbeat.put(("diagnost_control", "FINISHED"))
-        self.heartbeat.put(("surgeon_control", "FINISHED"))
+        self.stop_motion.set()
+        self.shutdown.set()
+        self.manual = False
+        self.busy = False
+        self.control_launch_btn.configure(state='disabled')
+        self.control_stop_btn.configure(state='disabled')
+        self.control_disable_btn.configure(state='disabled')
+        if self.worker:
+            self.worker.join(timeout=2)
+            if self.worker.is_alive():
+                self.worker.terminate()
+                self.worker.join(timeout=2)
+            if self.worker.is_alive():
+                self.worker.kill()
+                self.worker.join(timeout=2)
+            if self.worker.is_alive():
+                self.show_error('Процесс управления не остановился. Повторная инициализация запрещена.')
+                return
+            self.worker = None
+        # Discard commands left over from a stopped worker.
+        while True:
+            try:
+                self.commands.get_nowait()
+            except Empty:
+                break
+        self.control_initiate_btn.configure(state='normal')
+
+    def control_launch(self):
+        self.submit('manual_start')
 
     def control_stop(self):
-        print('control stopped')
-        self.control_stop_btn.configure(state=tk.DISABLED)
-        self.control_launch_btn.configure(state=tk.NORMAL)
-        program_lock.value = 1
+        self.stop_motion.set()
+        self.commands.put(('manual_stop', {}))
+        self.manual = False
+        self.control_launch_btn.configure(state='normal')
+        self.control_stop_btn.configure(state='disabled')
 
     def align(self):
-        print('aligned')
-        self.align_d_process = subprocess.Popen(['python', 'Align_D.py'])
+        self.submit('align', robot='diagnost')
 
     def unlock(self):
-        print('unlocked')
-        self.unlock_h_process = subprocess.Popen(['python', 'ESTOP_RESET_D.py'])
-        self.unlock_d_process = subprocess.Popen(['python', 'ESTOP_RESET_H.py'])
+        def task():
+            for ip in (self.diagnost_ip, self.surgeon_ip):
+                try:
+                    dashboard_command(ip, 'unlock protective stop')
+                except Exception as exc:
+                    self.messages.put(('ERROR', {'text': f'Разблокировка: {exc}'}))
+        threading.Thread(target=task, daemon=True).start()
+
+    def camera(self, name, script):
+        process = self.camera_processes.get(name)
+        if process and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2)
+            del self.camera_processes[name]
+        else:
+            self.camera_processes[name] = subprocess.Popen([sys.executable, str(Path(__file__).with_name(script))])
 
     def cam_d(self):
-        # if not self.cam_d_state:
-        #     print('Diagnost cam on')
-        #     self.cam_d_state = True
-        #     self.cam_d_process = subprocess.Popen(['python', 'camDiagn.py'])
-        # else:
-        #     self.cam_d_process.kill()
-        #     print('Diagnost cam off')
-        #     self.cam_d_state = False
-        self.show_error("Превышен порог силового давления!")
-        self.show_error("Начальная точка маршрута отсутствует")
-        self.show_warning('Управление диагноста отключено')
-        self.show_error("Робот в движении")
-        self.show_error("Данные отсутствуют")
-        self.show_error(
-            "Не удаётся запустить управление хирургом\nПроверьте состояние робота, он должен быть включен и разблокирован.")
-        self.show_error("ППУИ запущено!")
+        self.camera('diagnost', 'camDiagn.py')
 
     def cam_h(self):
-        if not self.cam_h_state:
-            print('Hirurg cam on')
-            self.cam_d_state = True
-            self.cam_h_process = subprocess.Popen(['python', 'camHirurg.py'])
-        else:
-            self.cam_h_process.kill()
-            print('Hirurg cam off')
-            self.cam_h_state = False
+        self.camera('surgeon', 'camHirurg.py')
+
+    def submit(self, action, **args):
+        if not self.worker or not self.worker.is_alive():
+            self.show_error('Сначала инициализируйте контроллеры')
+            return False
+        if self.busy or self.manual and action != 'manual_stop':
+            self.show_error('Сначала остановите текущее движение')
+            return False
+        self.stop_motion.clear()
+        self.busy = True
+        self.commands.put((action, args))
+        return True
+
+    def _parameters(self, operation=False):
+        if operation:
+            angle = robot_control.valid_float(self.move_angle_entry.get(), 'Угол', -180, 180, True)
+            if angle != 0:
+                raise ValueError('Движение под углом требует проверенной калибровки; используйте угол 0')
+            count = robot_control.valid_int(self.aphi_num_steps_entry.get(), 'Количество шагов')
+            step = robot_control.valid_float(self.aphi_step_val_entry.get(), 'Шаг', 0, 0.05)
+            pause = robot_control.valid_float(self.aphi_pause_time_entry.get(), 'Пауза', 0, 600, True)
+            speed = robot_control.valid_float(self.aphi_velocity_entry.get(), 'Скорость', 0, 0.1)
+            return {'count': count, 'step': step, 'pause': pause, 'speed': speed}
+        count = robot_control.valid_int(self.num_steps_entry.get(), 'Количество шагов')
+        steps = [-robot_control.valid_float(entry.get(), axis, -0.05, 0.05, True)
+                 for entry, axis in ((self.step_x_entry, 'X'), (self.step_y_entry, 'Y'),
+                                     (self.step_z_entry, 'Z'))]
+        if not any(steps):
+            raise ValueError('Укажите хотя бы один ненулевой шаг')
+        pause = robot_control.valid_float(self.pause_time_entry.get(), 'Пауза', 0, 600, True)
+        speed = robot_control.valid_float(self.velocity_entry.get(), 'Скорость', 0, 0.1)
+        return {'count': count, 'steps': steps, 'pause': pause, 'speed': speed}
 
     def start_route(self):
         try:
-            nsteps = int(self.num_steps_entry.get())
-            SX = float(self.step_x_entry.get())
-            SY = float(self.step_y_entry.get())
-            SZ = float(self.step_z_entry.get())
-            pause = float(self.pause_time_entry.get())
-            vel = float(self.velocity_entry.get())
-        except ValueError:
-            self.show_error("Пожалуйста, заполните все числовые поля корректными значениями!")
-            return
-
-        if program_lock.value == 0:
-            program_lock.value = 1
-            self.show_warning('Управление диагноста отключено')
-            sleep(5)
-
-        us_thread = Thread(target=route_follow, args=(nsteps, [-SX, -SY, -SZ], pause, vel))
-        us_thread.start()
+            self.submit('route', **self._parameters())
+        except ValueError as exc:
+            self.show_error(str(exc))
 
     def start_aphi(self):
-        if program_lock.value == 0:
-            program_lock.value = 1
-            self.show_warning('Управление диагноста отключено')
-            sleep(5)
-        angle = float(self.move_angle_entry.get())
-        nsteps = int(self.aphi_num_steps_entry.get())
-        step = float(self.aphi_step_val_entry.get())
-        pause = int(self.aphi_pause_time_entry.get())
-        vel = float(self.aphi_velocity_entry.get())
-        aphi_thread = Thread(target=aphi, args=(angle, nsteps, step, pause, vel))
-        aphi_thread.start()
+        try:
+            self.submit('aphi', **self._parameters(True))
+        except ValueError as exc:
+            self.show_error(str(exc))
 
     def stop_aphi(self):
-        pass
+        self.stop_routef()
 
     def fuck_go_back(self):
-        pass
+        self.submit('aphi_return')
 
     def save_aphi(self):
-        pass
+        self._save_poses(self.aphi_data)
 
     def ashido_pos(self):
-        if program_lock.value == 0:
-            program_lock.value = 1
-            self.show_warning('Управление диагноста отключено')
-            sleep(5)
-        angle = float(self.move_angle_entry.get()) if self.aphi_velocity_entry.get() != "" else 0
-        nsteps = int(self.aphi_num_steps_entry.get())
-        step = float(self.aphi_step_val_entry.get())
-        pause = int(self.aphi_pause_time_entry.get())
-        vel = float(self.aphi_velocity_entry.get())
-        ashido_thread = Thread(target=ashido_init, args=(nsteps, step, pause, angle))
-        ashido_thread.start()
+        self.submit('ashido_pos')
 
     def ashido_start(self):
-        if program_lock.value == 0:
-            program_lock.value = 1
-            self.show_warning('Управление диагноста отключено')
-            sleep(5)
-        angle = float(self.move_angle_entry.get()) if self.aphi_velocity_entry.get() != "" else 0
-        nsteps = int(self.aphi_num_steps_entry.get())
-        step = float(self.aphi_step_val_entry.get())
-        pause = int(self.aphi_pause_time_entry.get())
-        vel = float(self.aphi_velocity_entry.get())
-        ashido_thread = Thread(target=ashido, args=(nsteps, step, pause, vel, angle))
-        ashido_thread.start()
+        try:
+            self.submit('ashido_start', **self._parameters(True))
+        except ValueError as exc:
+            self.show_error(str(exc))
 
     def save_route(self):
-        if us_lock and False:
-            self.show_error("Робот в движении")
-            return 228
-        else:
-            file_path = filedialog.asksaveasfilename(defaultextension=".txt")
-            if file_path:
-                with open(file_path, "w") as file:
-                    file.write("Step | Time,s | Coordinate | Force, N\n")
-                    try:
-                        for x in range(len(rob_us_data[0])):
-                            file.write(f'{x} {rob_us_data[0][x]} {rob_us_data[1][x]} {rob_us_data[2][x]}\n')
-                    except IndexError:
-                        self.show_error("Данные отсутствуют")
+        if not self.route_data:
+            self.show_error('Данные отсутствуют')
+            return
+        path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV', '*.csv')])
+        if path:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['time_s', 'x', 'y', 'z', 'rx', 'ry', 'rz',
+                                 'fx', 'fy', 'fz', 'mx', 'my', 'mz'])
+                for elapsed, pose, force in self.route_data:
+                    writer.writerow([elapsed, *pose, *force])
+
+    def _save_poses(self, poses):
+        if not poses:
+            self.show_error('Путь отсутствует')
+            return
+        path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV', '*.csv')])
+        if path:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerows(poses)
 
     def save_d_route(self):
-        print(shared_path)
-        if (len(shared_path[0])):
-            file_path = filedialog.asksaveasfilename(defaultextension=".txt")
-            if file_path:
-                with open(file_path, "w") as file:
-                    for pos in shared_path[0]:
-                        file.write(str(pos[0]) + "|" + str(pos[1]) + "|" + str(pos[2]) + "\n")
-                shared_path[0] = []
-        else:
-            self.show_error("Путь отсутствует")
+        self._save_poses(self.paths['diagnost'])
 
     def save_h_route(self):
-        if (len(hirurg_path[0])):
-            file_path = filedialog.asksaveasfilename(defaultextension=".txt")
-            if file_path:
-                with open(file_path, "w") as file:
-                    for pos in hirurg_path[0]:
-                        file.write(str(pos[0]) + "|" + str(pos[1]) + "|" + str(pos[2]) + "\n")
-                hirurg_path[0] = []
-        else:
-            self.show_error("Путь отсутствует")
+        self._save_poses(self.paths['surgeon'])
+
+    def _load_route(self, name):
+        path = filedialog.askopenfilename(filetypes=[('CSV', '*.csv'), ('Text', '*.txt')])
+        if not path:
+            return
+        try:
+            with open(path, newline='', encoding='utf-8') as f:
+                poses = [robot_control.valid_pose(row) for row in csv.reader(f) if row]
+            if not poses:
+                raise ValueError('Пустой файл маршрута')
+            self.submit('replay', robot=name, poses=poses)
+        except (ValueError, OSError) as exc:
+            self.show_error(str(exc))
 
     def launch_h_route(self):
-        file_path = filedialog.askopenfile(title="Выберите файл маршрута хирурга", filetypes=[("Text files", "*.txt")])
-
-        pass
-
-    def stop_routef(self):
-        global stop_route
-        stop_route.set()
-
-    def return_to_start(self):
-        global starting_pose
-        if starting_pose:
-            ctrl = RTDEControlInterface("192.168.8.3")
-            recv = RTDEReceiveInterface("192.168.8.3")
-            ctrl.moveL(starting_pose, speed=0.2, acceleration=0.2)
-            while ctrl.isProgramRunning():
-                time.sleep(0.01)
-            ctrl.disconnect()
-            recv.disconnect()
-        else:
-            self.show_error("Начальная точка маршрута отсутствует")
+        self._load_route('surgeon')
 
     def launch_d_route(self):
-        pass
+        self._load_route('diagnost')
+
+    def stop_routef(self):
+        self.stop_motion.set()
+
+    def return_to_start(self):
+        self.submit('return_start')
 
     def system_monitor(self):
-        diag_recv = None
-        hirurg_recv = None
-
-        # Подключение к лазерным датчикам
-        self.laser_connected = self.laser_client.connect()
-        if self.laser_connected:
-            self.laser_client.start_stream()
-
-        while not self.monitor_stop_event.is_set():
-            try:
-                # === Чтение данных с роботов ===
-                if diag_recv is None or not diag_recv.isConnected():
-                    diag_recv = RTDEReceiveInterface("192.168.8.3")
-                if hirurg_recv is None or not hirurg_recv.isConnected():
-                    hirurg_recv = RTDEReceiveInterface("192.168.8.4")
-
-                diagnost_force = diag_recv.getActualTCPForce()
-                hirurg_force = hirurg_recv.getActualTCPForce()
-                diagnost_pose = diag_recv.getActualTCPPose()
-                hirurg_pose = hirurg_recv.getActualTCPPose()
-                diagnost_joints = diag_recv.getActualQ()
-                hirurg_joints = hirurg_recv.getActualQ()
-
-                # Обновление GUI - силы
-                if hasattr(self, 'diagnost_force_data_label'):
-                    self.diagnost_force_data_label.config(
-                        text=f'X:{diagnost_force[0]:.2f}, Y: {diagnost_force[1]:.2f}, Z: {diagnost_force[2]:.2f}')
-
-                # === Чтение данных с лазерных датчиков ===
+        try:
+            self.laser_connected = self.laser_client.connect()
+            if self.laser_connected:
+                self.laser_client.start_stream()
+            while not self.monitor_stop_event.wait(1):
                 if self.laser_connected:
-                    laser_data = self.laser_client.get_sensor_values()
-
-                    # Обновление GUI - лазерные датчики
-                    self.telemetry_vars['diag_las'].set(f"{laser_data['sensor_1']:.2f}")
-                    self.telemetry_vars['hir_las'].set(f"{laser_data['sensor_2']:.2f}")
-
-                    # Обновление статуса подключения лазеров
-                    if laser_data['status_1'] == 'ok':
-                        self.telemetry_vars['diag_status'].set("Подкл")
-                    else:
-                        self.telemetry_vars['diag_status'].set("Откл")
-
-                    if laser_data['status_2'] == 'ok':
-                        self.telemetry_vars['hir_status'].set("Подкл")
-                    else:
-                        self.telemetry_vars['hir_status'].set("Откл")
-
-                # Обновление GUI - силы роботов
-                self.telemetry_vars['diag_force'].set(f"{diagnost_force[2]:.2f}")
-                self.telemetry_vars['hir_force'].set(f"{hirurg_force[2]:.2f}")
-
-                # Логирование телеметрии в CSV
-                if self.telemetry_logger and getattr(self.telemetry_logger, 'enabled', False):
-                    self.telemetry_logger.log_data(
-                        ["диагност"] + list(diagnost_pose[:3]) + list(diagnost_joints) + list(diagnost_force))
-                    self.telemetry_logger.log_data(
-                        ["хирург"] + list(hirurg_pose[:3]) + list(hirurg_joints) + list(hirurg_force))
-
-                time.sleep(1)
-
-            except Exception as e:
-                # При ошибке просто пробуем reconnect
-                if diag_recv:
-                    try:
-                        diag_recv.disconnect()
-                    except:
-                        pass
-                if hirurg_recv:
-                    try:
-                        hirurg_recv.disconnect()
-                    except:
-                        pass
-                diag_recv = None
-                hirurg_recv = None
-                time.sleep(3)
-
-        # Очистка при завершении
-        if diag_recv:
-            try:
-                diag_recv.disconnect()
-            except:
-                pass
-        if hirurg_recv:
-            try:
-                hirurg_recv.disconnect()
-            except:
-                pass
-
-        # Отключение лазерных датчиков
-        if self.laser_client:
+                    values = self.laser_client.get_sensor_values()
+                    self.messages.put(('LASER', {'values': values}))
+        except Exception as exc:
+            self.messages.put(('ERROR', {'text': f'Лазерные датчики: {exc}'}))
+        finally:
             self.laser_client.disconnect()
 
-    def watchdog(self):
-        logger.debug("Запущен цикл мониторинга сердцебиения")
-        while not self.watchdog_stop_event.is_set():
-            current_time = time.time()
-            while not self.heartbeat.empty():
-                msg = self.heartbeat.get()
-                name = msg[0]
-                if name not in self.processes:
-                    logger.debug(f"Получено сообщение от неизвестного процесса {name}: {msg}")
-                    continue
-
-                proc = self.processes[name]
-                msg_type = msg[1]
-
-                if msg_type == "READY":
-                    proc['state'] = "READY"
-                    proc['last_heartbeat'] = msg[2]
-                    logger.info(f"Процесс {name} (PID: {proc['pid']}) готов к работе")
-                    self._update_status(name, "READY", "lightgreen")
-
-                elif msg_type == "ALIVE":
-                    prev_state = proc["state"]
-                    proc["state"] = "RUNNING"
-                    proc["last_heartbeat"] = msg[2]
-
-                    if prev_state != "RUNNING" or (current_time - getattr(proc, "last_log_time", 0)) > 30:
-                        uptime = current_time - proc["start_time"]
-                        logger.debug(
-                            f"Процесс {name} активен | PID: {proc['pid']} | Аптайм: {uptime:.1f}s | Последнее сердцебиение: {current_time - proc['last_heartbeat']:.2f}s назад")
-                        proc["last_log_time"] = current_time
-
-                    self._update_status(name, "RUNNING", "green")
-
-                elif msg_type == "ERROR":
-                    error_msg = msg[2]
-                    logger.error(f"Процесс {name} (PID: {proc['pid']}) ошибка: {error_msg}")
-                    self._force_restart(name, reason=f"Ошибка: {error_msg}")
-
-                elif msg_type == "CRASH":
-                    error_msg = msg[2]
-                    logger.critical(f"Процесс {name} (PID: {proc['pid']}) аварийно завершился: {error_msg}")
-                    self._force_restart(name, reason=f"Аварийное завершение: {error_msg}")
-                elif msg_type == "AWAITING":
-                    logger.info(f"Процесс {name} ожидает запуска")
-                    self._start_process(name)
-                elif msg_type == "FINISHED":
-                    logger.info(f"Процесс {name} завершил работу без ошибок")
-                    self._close_process(name)
-
-            for name in list(self.processes.keys()):
-                proc = self.processes[name]
-                time_since_hb = current_time - proc["last_heartbeat"]
-
-                if time_since_hb > self.heartbeat_timeout:
-                    if not proc['process'].is_alive():
-                        logger.warning(
-                            f"Процесс {name} (PID: {proc['pid']}) завершился без уведомления. Последнее сердцебиение: {time_since_hb:.1f}s назад")
-                        self._force_restart(name, reason="Неожиданное завершение процесса")
-                    else:
-                        logger.critical(
-                            f"ОБНАРУЖЕНО ЗАВИСАНИЕ: процесс {name} (PID: {proc.get('pid', 'N/A')}) не отвечает "
-                            f"в течение {time_since_hb:.1f}s (тайм: {self.heartbeat_timeout}s) "
-                            f"Состояние: {proc['state']}"
-                        )
-                        self._force_restart(name, reason="Зависание процесса (таймаут сердцебиения)")
-
-            time.sleep(1.0)
-
-    def _close_process(self, name):
-        if name in self.processes and self.processes[name] is not None:
-            proc = self.processes[name]['process']
-            if proc.is_alive():
-                proc.terminate()
-                proc.join(timeout=3.0)
-            del self.processes[name]
-
-    def _start_process(self, name):
-        logger.info(f"Запуск процесса {name}")
-        target_func = self.processes[name]['target']
-        params = self.processes[name]['params']
-
-        p = mp.Process(target=target_func, args=params, daemon=True, name=name)
-        p.start()
-
-        self.processes[name] = {
-            'process': p,
-            'last_heartbeat': time.time(),
-            'start_time': time.time(),
-            'params': params,
-            'state': 'STARTING',
-            'pid': p.pid,
-            'target': target_func
-        }
-
-    def _update_status(self, name, state, color):
-        pass
-
-    def _schedule_restart(self, name, reason="Плановый перезапуск"):
-        pass
-
-    def _actual_restart(self, name, target_func, params, reason=""):
-        self.restart_delays[name] = 1.0
-
-        logger.info(f"Перезапуск процесса {name} | Причина: {reason}")
-
-        p = mp.Process(target=target_func, args=params, daemon=True, name=name)
-        p.start()
-
-        self.processes[name] = {
-            'process': p,
-            'last_heartbeat': time.time(),
-            'start_time': time.time(),
-            'params': params,
-            'state': 'STARTING',
-            'pid': p.pid,
-            'target': target_func
-        }
-        self._update_status(name, "RESTARTING", "orange")
-
-    def _force_restart(self, name, reason="Неизвестная причина"):
-        proc = self.processes[name]
-        if not proc:
-            logger.warning(f"Попытка перезапуска несуществующего процесса {name}")
-            return
-
-        p = proc["process"]
-        pid = proc.get('pid', 'N/A')
-
-        logger.warning(f"Начало принудительного перезапуска {name} (PID: {pid}) | Причина: {reason}")
-
-        if p.is_alive():
-            logger.debug(f"Отправка SIGTERM процессу {name} (PID: {pid})")
-            p.terminate()
-            p.join(timeout=3.0)
-
-        if p.is_alive():
-            logger.error(f"Процесс {name} (PID: {pid}) не отвечает на SIGTERM, отправка SIGKILL")
-            p.kill()
-            p.join(timeout=2.0)
-
-        if p.is_alive():
-            logger.critical(f"НЕВОЗМОЖНО ЗАВЕРШИТЬ процесс {name} даже после SIGKILL!")
-        else:
-            logger.info(f"Процесс {name} (PID: {pid}) успешно завершён")
-
-        if name in self.processes:
-            del self.processes[name]
-
-        delay = self.restart_delays.get(name, 1.0)
-        self.restart_delays[name] = min(delay * 2, 30.0)
-
-        logger.info(f"Планирование перезапуска {name} через {delay:.1f}с (экспоненциальная задержка)")
-
-        threading.Timer(delay, self._actual_restart, args=(name, proc['target'], proc['params'], reason)).start()
-
-    def kill_all(self):
-        pass
+    def poll_worker(self):
+        try:
+            while True:
+                kind, data = self.messages.get_nowait()
+                if kind == 'TELEMETRY':
+                    for name, sample in data['robots'].items():
+                        key = 'diag' if name == 'diagnost' else 'hir'
+                        self.telemetry_vars[key + '_force'].set(f"{sample['force'][2]:.2f}")
+                        self.telemetry_logger.log_data(name, sample)
+                elif kind == 'LASER':
+                    values = data['values']
+                    for key, sensor in (('diag', 1), ('hir', 2)):
+                        val = values.get(f'sensor_{sensor}')
+                        self.telemetry_vars[key + '_las'].set(f'{val:.2f}' if val is not None else '—')
+                        self.telemetry_vars[key + '_status'].set('Подкл' if values.get(f'status_{sensor}') == 'ok' else 'Откл')
+                elif kind == 'PATH':
+                    self.paths[data['robot']] = data['poses']
+                elif kind == 'ROUTE':
+                    self.route_data, self.start_pose = data['rows'], data['start']
+                elif kind == 'APHI':
+                    self.aphi_data = data['poses']
+                elif kind == 'POWER_ON_DONE':
+                    self.system_stop_btn.configure(state='normal')
+                    self.system_launch_btn.configure(state='normal')
+                elif kind == 'POWER_OFF_DONE':
+                    self.system_stop_btn.configure(state='disabled')
+                elif kind in ('DONE', 'STOPPED'):
+                    self.busy = False
+                    if data.get('action') == 'manual_start' and kind == 'DONE':
+                        self.manual = True
+                        self.control_stop_btn.configure(state='normal')
+                        self.control_launch_btn.configure(state='disabled')
+                    elif data.get('action') == 'manual_stop':
+                        self.manual = False
+                        self.control_launch_btn.configure(state='normal')
+                        self.control_stop_btn.configure(state='disabled')
+                elif kind == 'ERROR':
+                    self.busy = False
+                    self.show_error(data['text'])
+                elif kind == 'INFO':
+                    print(data['text'])
+        except Empty:
+            pass
+        if self.worker and not self.worker.is_alive():
+            self.control_disable()
+            self.show_error('Процесс управления завершился. Проверьте связь и состояние роботов.')
+        try:
+            while True:
+                name, state, *_ = self.heartbeat.get_nowait()
+                if name == 'robot_worker' and state == 'READY':
+                    self.control_disable_btn.configure(state='normal')
+                    self.control_launch_btn.configure(state='normal')
+                    self.align_btn.configure(state='normal')
+        except Empty:
+            pass
+        self.after(100, self.poll_worker)
 
     def show_error(self, msg):
-        mb(title="ОШИБКА!", message=msg, icon="cancel")
+        mb(title='ОШИБКА!', message=msg, icon='cancel')
 
     def show_warning(self, msg):
-        mb(title="ВНИМАНИЕ!", message=msg, icon="warning")
+        mb(title='ВНИМАНИЕ!', message=msg, icon='warning')
 
-
-def on_closing():
-    logger.info("Получен сигнал закрытия приложения")
-    # Остановка лазерных датчиков
-    if hasattr(app, 'laser_client') and app.laser_client:
-        app.laser_client.disconnect()
-
-    for name in list(app.processes.keys()):
-        proc_data = app.processes.get(name)
-        if proc_data and proc_data["process"] is not None and proc_data["process"].is_alive():
-            proc_data["process"].kill()
-            proc_data["process"].join(timeout=2.0)
-    logger.info("Все процессы остановлены. Завершение работы.")
-    app.destroy()
+    def close(self):
+        self.monitor_stop_event.set()
+        self.control_disable()
+        for proc in self.camera_processes.values():
+            if proc.poll() is None:
+                proc.terminate()
+        self.destroy()
 
 
 if __name__ == '__main__':
-    logger = setup_status_logging()
     mp.freeze_support()
-    proxy = mp.Manager()
-    shared_path = proxy.list()
-    shared_path.append([])
-    hirurg_path = proxy.list()
-    hirurg_path.append([])
-    # root = tk.Tk()
     app = RobotControlUI()
-    app.protocol("WM_DELETE_WINDOW", on_closing)
+    app.protocol('WM_DELETE_WINDOW', app.close)
     app.mainloop()

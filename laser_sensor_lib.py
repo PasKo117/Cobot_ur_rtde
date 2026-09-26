@@ -6,6 +6,7 @@ import socket
 import json
 import threading
 import time
+from queue import Queue, Empty
 from datetime import datetime
 
 
@@ -23,18 +24,21 @@ class LaserSensorClient:
             2: {'value': None, 'ts': 0, 'status': 'disconnected'}
         }
         self.stream_lock = threading.Lock()
+        self.command_lock = threading.Lock()
+        self.responses = Queue()
         self.stream_thread = None
         self.running = True
 
     def connect(self, max_attempts=3):
         """Подключение к серверу на Raspberry Pi"""
+        self.running = True
         for attempt in range(max_attempts):
             try:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.sock.settimeout(2)
                 self.sock.connect((self.pi_ip, self.tcp_port))
                 self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                self.sock.settimeout(None)
+                self.sock.settimeout(0.4)
                 self.connected = True
 
                 # Запуск потока для приёма стрим-данных
@@ -56,11 +60,10 @@ class LaserSensorClient:
         buffer = ""
         while self.running and self.connected:
             try:
-                self.sock.settimeout(0.4)
                 chunk = self.sock.recv(4096).decode('utf-8', errors='ignore')
                 if not chunk:
-                    time.sleep(0.05)
-                    continue
+                    self.connected = False
+                    break
                 buffer += chunk
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
@@ -70,47 +73,46 @@ class LaserSensorClient:
                         msg = json.loads(line.strip())
                         if msg.get('type') == 'stream':
                             sid = msg.get('sensor_id', 1)
-                            with self.stream_lock:
-                                self.last_stream_data[sid] = {
-                                    'value': msg.get('value'),
-                                    'ts': time.time(),
-                                    'status': 'ok'
-                                }
+                            if sid in self.last_stream_data:
+                                with self.stream_lock:
+                                    self.last_stream_data[sid] = {
+                                        'value': msg.get('value'),
+                                        'ts': time.time(),
+                                        'status': 'ok'
+                                    }
+                        else:
+                            self.responses.put(msg)
                     except json.JSONDecodeError:
                         pass
             except socket.timeout:
                 pass
             except (ConnectionResetError, BrokenPipeError, OSError):
+                self.connected = False
                 break
             except Exception as e:
+                self.connected = False
                 break
             time.sleep(0.01)
 
     def _send_command(self, action, sensor_id=None, **kw):
         """Отправка команды серверу"""
-        if not self.sock:
+        if not self.sock or not self.connected:
             return None
-        try:
-            payload = {"action": action, **kw}
-            if sensor_id is not None:
-                payload['sensor_id'] = sensor_id
-            req = json.dumps(payload).encode() + b"\n"
-            self.sock.sendall(req)
-
-            buffer = ""
-            self.sock.settimeout(1.5)
-            while True:
-                chunk = self.sock.recv(4096).decode('utf-8', errors='ignore')
-                if not chunk:
-                    break
-                buffer += chunk
-                if "\n" in buffer:
-                    line = buffer.split("\n")[0]
-                    self.sock.settimeout(None)
-                    return json.loads(line.strip())
-        except:
-            return None
-        return None
+        with self.command_lock:
+            try:
+                payload = {"action": action, **kw}
+                if sensor_id is not None:
+                    payload['sensor_id'] = sensor_id
+                self.sock.sendall(json.dumps(payload).encode() + b"\n")
+                return self.responses.get(timeout=1.5)
+            except (OSError, Empty):
+                # Protocol has no request IDs: never reuse a socket after a timeout.
+                self.connected = False
+                try:
+                    self.sock.close()
+                except OSError:
+                    pass
+                return None
 
     def get_sensor_values(self):
         """
@@ -171,8 +173,8 @@ class LaserSensorClient:
 
     def disconnect(self):
         """Отключиться"""
-        self.running = False
         self.stop_stream()
+        self.running = False
         if self.sock:
             try:
                 self.sock.close()
@@ -180,3 +182,5 @@ class LaserSensorClient:
                 pass
             self.sock = None
         self.connected = False
+        if self.stream_thread and self.stream_thread is not threading.current_thread():
+            self.stream_thread.join(timeout=0.5)
