@@ -11,6 +11,13 @@ from pathlib import Path
 
 DIAG_IP = '192.168.8.3'
 SURGEON_IP = '192.168.8.4'
+DEFAULT_BUTTONS = {
+    'surgeon': {'tool_frame': 0, 'z_plus': 4, 'z_minus': 2,
+                'sync_on': 6, 'sync_off': 7, 'level_diagnost': 8,
+                'save': 9, 'record': 10, 'replay': 11},
+    'diagnost': {'tool_frame': 0, 'z_plus': 4, 'z_minus': 2,
+                 'save': 9, 'record': 10, 'replay': 11},
+}
 
 
 def valid_int(value, name, maximum=10000):
@@ -62,6 +69,8 @@ class RobotWorker:
         self.ctrl, self.recv = {}, {}
         self.joysticks = {}
         self.manual = False
+        self.mode = 'async'
+        self.calibration = None
         self.last_heartbeat = 0
         self.last_telemetry = 0
         self.last_buttons = {'diagnost': set(), 'surgeon': set()}
@@ -71,7 +80,43 @@ class RobotWorker:
         self.aphi_data = []
         self.aphi_start = None
         config = Path(__file__).with_name('joystick_map.json')
-        self.buttons = json.loads(config.read_text(encoding='utf-8')) if config.exists() else {}
+        self.buttons = {name: mapping.copy() for name, mapping in DEFAULT_BUTTONS.items()}
+        self.default_buttons = not config.exists()
+        if config.exists():
+            custom = json.loads(config.read_text(encoding='utf-8'))
+            for name, mapping in custom.items():
+                if name not in self.buttons or not isinstance(mapping, dict):
+                    raise ValueError(f'Неизвестный джойстик в joystick_map.json: {name}')
+                self.buttons[name].update(mapping)
+
+    def load_calibration(self):
+        """CalibrationManager saves R from diagnost base to surgeon base."""
+        filename = Path(__file__).with_name('calibration_data.json')
+        data = json.loads(filename.read_text(encoding='utf-8'))
+        rotation = data['R']
+        if len(rotation) != 3 or any(len(row) != 3 for row in rotation):
+            raise ValueError('матрица R должна быть 3x3')
+        rotation = [[float(v) for v in row] for row in rotation]
+        if not all(math.isfinite(v) for row in rotation for v in row):
+            raise ValueError('матрица R содержит неконечные значения')
+        for i in range(3):
+            for j in range(3):
+                dot = sum(rotation[i][k] * rotation[j][k] for k in range(3))
+                if abs(dot - (1 if i == j else 0)) > 0.01:
+                    raise ValueError('матрица R не ортонормальна')
+        determinant = (rotation[0][0]*(rotation[1][1]*rotation[2][2]-rotation[1][2]*rotation[2][1])
+                       - rotation[0][1]*(rotation[1][0]*rotation[2][2]-rotation[1][2]*rotation[2][0])
+                       + rotation[0][2]*(rotation[1][0]*rotation[2][1]-rotation[1][1]*rotation[2][0]))
+        if abs(determinant - 1) > 0.01:
+            raise ValueError('матрица R имеет неверный определитель')
+        return rotation
+
+    def diagnost_planar_speed(self, surgeon_speed):
+        """R maps diagnost -> surgeon; transpose maps velocity back to diagnost."""
+        linear = surgeon_speed[:3]
+        result = [sum(self.calibration[i][axis] * linear[i] for i in range(3))
+                  for axis in range(2)]
+        return result + [0.0, 0.0, 0.0, 0.0]
 
     def emit(self, kind, **data):
         self.messages.put((kind, data))
@@ -101,7 +146,14 @@ class RobotWorker:
             joy = pygame.joystick.Joystick(index)
             joy.init()
             self.joysticks[name] = joy
+            for action, button in self.buttons.get(name, {}).items():
+                if button is None and action not in ('tool_frame', 'z_plus', 'z_minus'):
+                    continue
+                if not isinstance(button, int) or not 0 <= button < joy.get_numbuttons():
+                    raise ValueError(f'{name}: индекс {action}={button} отсутствует на джойстике')
             self.emit('INFO', text=f'{name}: {joy.get_name()}, кнопок: {joy.get_numbuttons()}')
+        if self.default_buttons:
+            self.emit('INFO', text='joystick_map.json отсутствует; используются индексы из README')
 
     def stop_speed(self):
         for control in self.ctrl.values():
@@ -118,7 +170,7 @@ class RobotWorker:
             self.check_stop()
             time.sleep(min(0.02, max(0, until - time.monotonic())))
 
-    def move(self, name, pose, speed=0.05, acceleration=0.1):
+    def move(self, name, pose, speed=0.05, acceleration=0.1, cancel_check=None):
         self.check_stop()
         pose = valid_pose(pose)
         ctrl = self.ctrl[name]
@@ -128,6 +180,8 @@ class RobotWorker:
         try:
             while ctrl.getAsyncOperationProgress() >= 0:
                 self.check_stop()
+                if cancel_check is not None and cancel_check():
+                    raise Cancelled()
                 self.telemetry()
                 time.sleep(0.02)
             self.check_stop()
@@ -141,14 +195,17 @@ class RobotWorker:
         sample = {}
         for name in self.ips:
             receiver = self.recv[name]
-            sample[name] = {'pose': list(receiver.getActualTCPPose()),
-                            'joints': list(receiver.getActualQ()),
-                            'force': list(receiver.getActualTCPForce())}
+            try:
+                sample[name] = {'pose': list(receiver.getActualTCPPose()),
+                                'joints': list(receiver.getActualQ()),
+                                'force': list(receiver.getActualTCPForce())}
+            except Exception as error:
+                raise ConnectionError(f'{name} ({self.ips[name]}): канал RTDEReceive: {error}') from error
         self.emit('TELEMETRY', robots=sample)
         self.last_telemetry = time.monotonic()
 
     def button(self, joy, index):
-        return index < joy.get_numbuttons() and bool(joy.get_button(index))
+        return isinstance(index, int) and 0 <= index < joy.get_numbuttons() and bool(joy.get_button(index))
 
     def mapped_button(self, name, joy, key, default):
         index = int(self.buttons.get(name, {}).get(key, default))
@@ -157,7 +214,29 @@ class RobotWorker:
     def manual_step(self):
         import pygame
         pygame.event.pump()
+        surgeon = self.joysticks['surgeon']
+        surgeon_pressed = {i for i in range(surgeon.get_numbuttons()) if self.button(surgeon, i)}
+        surgeon_rising = surgeon_pressed - self.last_buttons['surgeon']
+        surgeon_map = self.buttons.get('surgeon', {})
+        if surgeon_map.get('sync_off') in surgeon_rising and self.mode != 'async':
+            self.ctrl['diagnost'].speedStop(0.5)
+            self.mode = 'async'
+            self.emit('MODE', mode='async')
+        elif surgeon_map.get('sync_on') in surgeon_rising and self.mode != 'sync':
+            try:
+                self.calibration = self.load_calibration()
+            except (OSError, KeyError, TypeError, ValueError) as error:
+                self.emit('INFO', text=f'Синхронный режим недоступен: {error}')
+            else:
+                self.ctrl['diagnost'].speedStop(0.5)
+                self.mode = 'sync'
+                self.emit('MODE', mode='sync')
         for name, joy in self.joysticks.items():
+            pressed = {i for i in range(joy.get_numbuttons()) if self.button(joy, i)}
+            rising = pressed - self.last_buttons[name]
+            if name == 'diagnost' and self.mode == 'sync':
+                self.last_buttons[name] = pressed
+                continue
             hat = joy.get_hat(0) if joy.get_numhats() else (0, 0)
             axis = lambda i: joy.get_axis(i) if i < joy.get_numaxes() and abs(joy.get_axis(i)) > 0.25 else 0.0
             velocity = 0.015 if name == 'surgeon' else 0.01
@@ -166,21 +245,53 @@ class RobotWorker:
                        self.mapped_button(name, joy, 'z_minus', 2)) * velocity,
                       -axis(1) * 0.19, -axis(0) * 0.19, -axis(2) * 0.19]
             # Physical button 0 selects tool-frame speed; otherwise base frame.
-            if self.mapped_button(name, joy, 'tool_frame', 0):
-                self.ctrl[name].speedL(self._tool_speed_to_base(speeds, self.recv[name].getActualTCPPose()), 0.1, 0.1)
-            else:
-                self.ctrl[name].speedL(speeds, 0.1, 0.1)
-            pressed = {i for i in range(joy.get_numbuttons()) if self.button(joy, i)}
-            rising = pressed - self.last_buttons[name]
+            base_speeds = (self._tool_speed_to_base(speeds, self.recv[name].getActualTCPPose())
+                           if self.mapped_button(name, joy, 'tool_frame', 0) else speeds)
+            self.ctrl[name].speedL(base_speeds, 0.1, 0.1)
+            if name == 'surgeon' and self.mode == 'sync':
+                self.ctrl['diagnost'].speedL(self.diagnost_planar_speed(base_speeds), 0.1, 0.1)
+            buttons = self.buttons.get(name, {})
+            if name == 'surgeon' and buttons.get('level_diagnost') in rising and self.mode == 'async':
+                self.stop_speed()
+                pose = list(self.recv['diagnost'].getActualTCPPose())
+                pose[3:] = [0.0, math.pi, 0.0]
+                self.move('diagnost', pose, 0.05, 0.1)
+                self.emit('INFO', text='Ориентация диагноста выровнена')
+            elif name == 'surgeon' and buttons.get('level_diagnost') in rising:
+                self.emit('INFO', text='Для выравнивания диагноста сначала включите асинхронный режим (7)')
             if self.buttons.get(name, {}).get('record') in rising:
                 self.paths[name].append(list(self.recv[name].getActualTCPPose()))
-                self.emit('PATH', robot=name, poses=self.paths[name])
+                self.emit('PATH', robot=name, poses=[p[:] for p in self.paths[name]])
             if self.buttons.get(name, {}).get('save') in rising:
-                self.emit('PATH', robot=name, poses=self.paths[name])
+                self.last_buttons[name] = pressed
+                if self.paths[name]:
+                    self.manual = False
+                    self.stop_speed()
+                    self.mode = 'async'
+                    self.calibration = None
+                    self.emit('MODE', mode=self.mode)
+                    self.emit('MANUAL_PAUSED')
+                    self.emit('SAVE_REQUEST', robot=name, poses=[p[:] for p in self.paths[name]])
+                    return
+                self.emit('INFO', text=f'{name}: нет записанных точек')
             if self.buttons.get(name, {}).get('replay') in rising and self.paths[name]:
                 self.stop_speed()
+                replay_button = buttons['replay']
+                released = False
+
+                def replay_cancelled():
+                    nonlocal released
+                    pygame.event.pump()
+                    held = self.button(joy, replay_button)
+                    if not held:
+                        released = True
+                    return released and held
+
                 for pose in self.paths[name]:
-                    self.move(name, pose, 0.05, 0.1)
+                    self.move(name, pose, 0.05, 0.1, cancel_check=replay_cancelled)
+                self.emit('INFO', text=f'{name}: воспроизведено точек: {len(self.paths[name])}')
+            elif self.buttons.get(name, {}).get('replay') in rising:
+                self.emit('INFO', text=f'{name}: нет записанных точек для воспроизведения')
             self.last_buttons[name] = pressed
 
     @staticmethod
@@ -204,11 +315,17 @@ class RobotWorker:
             if not self.joysticks:
                 self.init_joysticks()
             self.check_stop()
+            self.mode = 'async'
+            self.calibration = None
             self.manual = True
+            self.emit('MODE', mode=self.mode)
             return
         if action == 'manual_stop':
             self.manual = False
             self.stop_speed()
+            self.mode = 'async'
+            self.calibration = None
+            self.emit('MODE', mode=self.mode)
             return
         if action == 'align':
             name = args['robot']
@@ -285,14 +402,18 @@ class RobotWorker:
                     if self.manual:
                         self.manual = False
                         self.stop_speed()
+                        self.mode = 'async'
+                        self.emit('MANUAL_PAUSED')
                     if action and action != 'manual_stop':
                         self.emit('STOPPED', action=action)
                         action = None
                     self.stop_event.clear()
                 if action:
                     try:
+                        was_manual = self.manual
                         self.manual = False if action not in ('manual_start',) else self.manual
-                        self.stop_speed()
+                        if was_manual:
+                            self.stop_speed()
                         self.execute(action, args)
                         self.emit('DONE', action=action)
                     except Cancelled:
@@ -305,10 +426,14 @@ class RobotWorker:
                     except Cancelled:
                         self.manual = False
                         self.stop_speed()
+                        self.mode = 'async'
+                        self.emit('MANUAL_PAUSED')
                     except Exception as error:
                         self.manual = False
                         self.emit('ERROR', text=f'Джойстик: {error}')
                         self.stop_speed()
+                        self.mode = 'async'
+                        self.emit('MANUAL_PAUSED')
                 try:
                     self.telemetry()
                 except Exception as error:

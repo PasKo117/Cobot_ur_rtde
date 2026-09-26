@@ -18,6 +18,7 @@ import customtkinter as ctk
 from CTkMessagebox import CTkMessagebox as mb
 
 import robot_control
+import route_io
 from laser_sensor_lib import LaserSensorClient
 
 ctk.set_appearance_mode('Dark')
@@ -71,6 +72,9 @@ class RobotControlUI(ctk.CTk):
         # Переменные системы
         self.heartbeat = mp.Queue()
         self.tel_logging_var = ctk.BooleanVar(value=False)
+        self.mode_var = ctk.StringVar(value='Режим: асинхронный')
+        self.path_var = ctk.StringVar(value='Точек: хирург 0 · диагност 0')
+        self.action_status_var = ctk.StringVar(value='Ожидание подключения')
 
         self.monitor_stop_event = threading.Event()
 
@@ -108,6 +112,7 @@ class RobotControlUI(ctk.CTk):
         self.route_data = []
         self.aphi_data = []
         self.paths = {'diagnost': [], 'surgeon': []}
+        self.pending_path_save = None
         self.start_pose = None
         self.camera_processes = {}
         self.telemetry_logger = CSVLogger()
@@ -193,6 +198,9 @@ class RobotControlUI(ctk.CTk):
         self.unlock_btn = ctk.CTkButton(left_frame, text='Разблокировка', command=self.unlock,
                                         fg_color="#E67E22", hover_color="#D35400")
         self.unlock_btn.grid(column=1, row=6, padx=10, pady=5, sticky="ew")
+        ctk.CTkLabel(left_frame, textvariable=self.mode_var).grid(column=0, row=7, columnspan=2, pady=3)
+        ctk.CTkLabel(left_frame, textvariable=self.action_status_var, wraplength=370).grid(
+            column=0, row=8, columnspan=2, pady=3)
 
         # --- Правая колонка: Маршруты ---
         right_frame = ctk.CTkFrame(self.control_tab, corner_radius=10)
@@ -217,6 +225,7 @@ class RobotControlUI(ctk.CTk):
                                                 command=self.launch_h_route,
                                                 fg_color="#3498DB", hover_color="#2980B9")
         self.launch_h_route_btn.grid(column=0, row=4, padx=10, pady=5, sticky="ew")
+        ctk.CTkLabel(right_frame, textvariable=self.path_var).grid(column=0, row=5, pady=5)
 
         right_frame.grid_columnconfigure(0, weight=1)
 
@@ -482,6 +491,7 @@ class RobotControlUI(ctk.CTk):
         self.shutdown.set()
         self.manual = False
         self.busy = False
+        self.pending_path_save = None
         self.control_launch_btn.configure(state='disabled')
         self.control_stop_btn.configure(state='disabled')
         self.control_disable_btn.configure(state='disabled')
@@ -514,6 +524,7 @@ class RobotControlUI(ctk.CTk):
         self.manual = False
         self.control_launch_btn.configure(state='normal')
         self.control_stop_btn.configure(state='disabled')
+        self.mode_var.set('Режим: асинхронный')
 
     def align(self):
         self.submit('align', robot='diagnost')
@@ -623,25 +634,39 @@ class RobotControlUI(ctk.CTk):
             return
         path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV', '*.csv')])
         if path:
-            with open(path, 'w', newline='', encoding='utf-8') as f:
-                csv.writer(f).writerows(poses)
+            try:
+                count = route_io.write_poses(path, poses)
+            except (OSError, ValueError) as exc:
+                self.show_error(f'Не удалось сохранить маршрут: {exc}')
+            else:
+                self.action_status_var.set(f'Сохранено {count} точек: {Path(path).name}')
+
+    def _save_robot_route(self, name):
+        poses = [pose[:] for pose in self.paths[name]]
+        if not poses:
+            self.show_error('Путь отсутствует')
+        elif self.busy:
+            self.show_error('Дождитесь остановки текущего движения')
+        elif self.manual:
+            self.pending_path_save = poses
+            self.control_stop()
+        else:
+            self._save_poses(poses)
 
     def save_d_route(self):
-        self._save_poses(self.paths['diagnost'])
+        self._save_robot_route('diagnost')
 
     def save_h_route(self):
-        self._save_poses(self.paths['surgeon'])
+        self._save_robot_route('surgeon')
 
     def _load_route(self, name):
-        path = filedialog.askopenfilename(filetypes=[('CSV', '*.csv'), ('Text', '*.txt')])
+        path = filedialog.askopenfilename(filetypes=[('Маршруты', '*.csv *.txt'), ('Все файлы', '*.*')])
         if not path:
             return
         try:
-            with open(path, newline='', encoding='utf-8') as f:
-                poses = [robot_control.valid_pose(row) for row in csv.reader(f) if row]
-            if not poses:
-                raise ValueError('Пустой файл маршрута')
-            self.submit('replay', robot=name, poses=poses)
+            poses = route_io.read_poses(path)
+            if self.submit('replay', robot=name, poses=poses):
+                self.action_status_var.set(f'Воспроизведение: {name}, {len(poses)} точек')
         except (ValueError, OSError) as exc:
             self.show_error(str(exc))
 
@@ -688,6 +713,18 @@ class RobotControlUI(ctk.CTk):
                         self.telemetry_vars[key + '_status'].set('Подкл' if values.get(f'status_{sensor}') == 'ok' else 'Откл')
                 elif kind == 'PATH':
                     self.paths[data['robot']] = data['poses']
+                    self.path_var.set(f"Точек: хирург {len(self.paths['surgeon'])} · "
+                                      f"диагност {len(self.paths['diagnost'])}")
+                elif kind == 'MODE':
+                    self.mode_var.set('Режим: синхронный' if data['mode'] == 'sync'
+                                      else 'Режим: асинхронный')
+                elif kind == 'MANUAL_PAUSED':
+                    self.manual = False
+                    self.control_launch_btn.configure(state='normal')
+                    self.control_stop_btn.configure(state='disabled')
+                    self.mode_var.set('Режим: асинхронный')
+                elif kind == 'SAVE_REQUEST':
+                    self.after(0, lambda poses=data['poses']: self._save_poses(poses))
                 elif kind == 'ROUTE':
                     self.route_data, self.start_pose = data['rows'], data['start']
                 elif kind == 'APHI':
@@ -707,10 +744,16 @@ class RobotControlUI(ctk.CTk):
                         self.manual = False
                         self.control_launch_btn.configure(state='normal')
                         self.control_stop_btn.configure(state='disabled')
+                        if self.pending_path_save is not None:
+                            poses = self.pending_path_save
+                            self.pending_path_save = None
+                            self.after(0, lambda poses=poses: self._save_poses(poses))
                 elif kind == 'ERROR':
                     self.busy = False
+                    self.action_status_var.set(data['text'])
                     self.show_error(data['text'])
                 elif kind == 'INFO':
+                    self.action_status_var.set(data['text'])
                     print(data['text'])
         except Empty:
             pass
