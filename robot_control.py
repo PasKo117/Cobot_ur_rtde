@@ -20,6 +20,13 @@ DEFAULT_BUTTONS = {
 }
 
 
+def speed_fraction(percent):
+    """Scale commanded speeds; 100% keeps the existing application limits."""
+    if not isinstance(percent, int) or not 0 <= percent <= 100:
+        raise ValueError('Скорость должна быть целым числом от 0 до 100%')
+    return percent / 100.0
+
+
 def valid_int(value, name, maximum=10000):
     number = int(value)
     if not 1 <= number <= maximum:
@@ -62,10 +69,12 @@ class Cancelled(Exception):
 
 class RobotWorker:
     def __init__(self, commands, messages, stop_event, shutdown, heartbeat,
-                 diag_ip=DIAG_IP, surgeon_ip=SURGEON_IP):
+                 diag_ip=DIAG_IP, surgeon_ip=SURGEON_IP, speed_percent=None):
         self.commands, self.messages = commands, messages
         self.stop_event, self.shutdown, self.heartbeat = stop_event, shutdown, heartbeat
         self.ips = {'diagnost': diag_ip, 'surgeon': surgeon_ip}
+        self.speed_percent = speed_percent
+        self.last_manual_speed = None
         self.ctrl, self.recv = {}, {}
         self.joysticks = {}
         self.manual = False
@@ -161,8 +170,12 @@ class RobotWorker:
 
     def check_stop(self):
         self.beat()
-        if self.stop_event.is_set() or self.shutdown.is_set():
+        if self.stop_event.is_set() or self.shutdown.is_set() or self.current_speed == 0:
             raise Cancelled()
+
+    @property
+    def current_speed(self):
+        return self.speed_percent.value if self.speed_percent is not None else 100
 
     def wait(self, seconds):
         until = time.monotonic() + seconds
@@ -174,20 +187,29 @@ class RobotWorker:
         self.check_stop()
         pose = valid_pose(pose)
         ctrl = self.ctrl[name]
-        # RTDE accepts async as the fourth positional argument (async is a keyword).
-        if not ctrl.moveL(pose, speed, acceleration, True):
-            raise RuntimeError(f'{name}: команда moveL отклонена')
-        try:
-            while ctrl.getAsyncOperationProgress() >= 0:
-                self.check_stop()
-                if cancel_check is not None and cancel_check():
-                    raise Cancelled()
-                self.telemetry()
-                time.sleep(0.02)
+        while True:
+            percent = self.current_speed
             self.check_stop()
-        except BaseException:
-            ctrl.stopL(0.5)
-            raise
+            # RTDE accepts async as the fourth positional argument (async is a keyword).
+            if not ctrl.moveL(pose, speed * speed_fraction(percent), acceleration, True):
+                raise RuntimeError(f'{name}: команда moveL отклонена')
+            try:
+                while ctrl.getAsyncOperationProgress() >= 0:
+                    self.check_stop()
+                    if cancel_check is not None and cancel_check():
+                        raise Cancelled()
+                    if self.current_speed != percent:
+                        # Restart the same target from the current pose at the new speed.
+                        ctrl.stopL(0.5)
+                        break
+                    self.telemetry()
+                    time.sleep(0.02)
+                else:
+                    self.check_stop()
+                    return
+            except BaseException:
+                ctrl.stopL(0.5)
+                raise
 
     def telemetry(self):
         if time.monotonic() - self.last_telemetry < 0.5:
@@ -214,6 +236,11 @@ class RobotWorker:
     def manual_step(self):
         import pygame
         pygame.event.pump()
+        percent = self.current_speed
+        factor = speed_fraction(percent)
+        if percent == 0 and self.last_manual_speed != 0:
+            self.stop_speed()
+        self.last_manual_speed = percent
         surgeon = self.joysticks['surgeon']
         surgeon_pressed = {i for i in range(surgeon.get_numbuttons()) if self.button(surgeon, i)}
         surgeon_rising = surgeon_pressed - self.last_buttons['surgeon']
@@ -240,15 +267,16 @@ class RobotWorker:
             hat = joy.get_hat(0) if joy.get_numhats() else (0, 0)
             axis = lambda i: joy.get_axis(i) if i < joy.get_numaxes() and abs(joy.get_axis(i)) > 0.25 else 0.0
             velocity = 0.015 if name == 'surgeon' else 0.01
-            speeds = [hat[0] * velocity, hat[1] * velocity,
+            speeds = [hat[0] * velocity * factor, hat[1] * velocity * factor,
                       (self.mapped_button(name, joy, 'z_plus', 4) -
-                       self.mapped_button(name, joy, 'z_minus', 2)) * velocity,
-                      -axis(1) * 0.19, -axis(0) * 0.19, -axis(2) * 0.19]
+                       self.mapped_button(name, joy, 'z_minus', 2)) * velocity * factor,
+                      -axis(1) * 0.19 * factor, -axis(0) * 0.19 * factor, -axis(2) * 0.19 * factor]
             # Physical button 0 selects tool-frame speed; otherwise base frame.
             base_speeds = (self._tool_speed_to_base(speeds, self.recv[name].getActualTCPPose())
                            if self.mapped_button(name, joy, 'tool_frame', 0) else speeds)
-            self.ctrl[name].speedL(base_speeds, 0.1, 0.1)
-            if name == 'surgeon' and self.mode == 'sync':
+            if factor:
+                self.ctrl[name].speedL(base_speeds, 0.1, 0.1)
+            if factor and name == 'surgeon' and self.mode == 'sync':
                 self.ctrl['diagnost'].speedL(self.diagnost_planar_speed(base_speeds), 0.1, 0.1)
             buttons = self.buttons.get(name, {})
             if name == 'surgeon' and buttons.get('level_diagnost') in rising and self.mode == 'async':
@@ -258,7 +286,7 @@ class RobotWorker:
                 self.move('diagnost', pose, 0.05, 0.1)
                 self.emit('INFO', text='Ориентация диагноста выровнена')
             elif name == 'surgeon' and buttons.get('level_diagnost') in rising:
-                self.emit('INFO', text='Для выравнивания диагноста сначала включите асинхронный режим (7)')
+                self.emit('INFO', text='Для выравнивания диагноста сначала включите асинхронный режим (физическая кнопка 8)')
             if self.buttons.get(name, {}).get('record') in rising:
                 self.paths[name].append(list(self.recv[name].getActualTCPPose()))
                 self.emit('PATH', robot=name, poses=[p[:] for p in self.paths[name]])
@@ -459,5 +487,7 @@ class RobotWorker:
             self.heartbeat.put(('robot_worker', 'FINISHED', time.time()))
 
 
-def main(commands, messages, stop_event, shutdown, heartbeat, diag_ip=DIAG_IP, surgeon_ip=SURGEON_IP):
-    RobotWorker(commands, messages, stop_event, shutdown, heartbeat, diag_ip, surgeon_ip).run()
+def main(commands, messages, stop_event, shutdown, heartbeat, diag_ip=DIAG_IP,
+         surgeon_ip=SURGEON_IP, speed_percent=None):
+    RobotWorker(commands, messages, stop_event, shutdown, heartbeat,
+                diag_ip, surgeon_ip, speed_percent).run()

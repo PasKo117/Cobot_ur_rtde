@@ -71,8 +71,10 @@ class RobotControlUI(ctk.CTk):
 
         # Переменные системы
         self.heartbeat = mp.Queue()
+        self.speed_percent = mp.Value('i', 100)
         self.tel_logging_var = ctk.BooleanVar(value=False)
         self.mode_var = ctk.StringVar(value='Режим: асинхронный')
+        self.speed_entry_var = ctk.StringVar(value='100')
         self.path_var = ctk.StringVar(value='Точек: хирург 0 · диагност 0')
         self.action_status_var = ctk.StringVar(value='Ожидание подключения')
 
@@ -199,8 +201,20 @@ class RobotControlUI(ctk.CTk):
                                         fg_color="#E67E22", hover_color="#D35400")
         self.unlock_btn.grid(column=1, row=6, padx=10, pady=5, sticky="ew")
         ctk.CTkLabel(left_frame, textvariable=self.mode_var).grid(column=0, row=7, columnspan=2, pady=3)
+        speed_frame = ctk.CTkFrame(left_frame)
+        speed_frame.grid(column=0, row=8, columnspan=2, padx=10, pady=4, sticky='ew')
+        ctk.CTkLabel(speed_frame, text='Скорость команд, %').grid(column=0, row=0, columnspan=2, pady=3)
+        self.speed_slider = ctk.CTkSlider(speed_frame, from_=0, to=100, number_of_steps=100,
+                                           command=self._set_speed_from_slider)
+        self.speed_slider.grid(column=0, row=1, padx=(10, 5), pady=5, sticky='ew')
+        self.speed_slider.set(100)
+        self.speed_entry = ctk.CTkEntry(speed_frame, width=55, textvariable=self.speed_entry_var)
+        self.speed_entry.grid(column=1, row=1, padx=(5, 10), pady=5)
+        self.speed_entry.bind('<Return>', self._set_speed_from_entry)
+        self.speed_entry.bind('<FocusOut>', self._set_speed_from_entry)
+        speed_frame.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(left_frame, textvariable=self.action_status_var, wraplength=370).grid(
-            column=0, row=8, columnspan=2, pady=3)
+            column=0, row=9, columnspan=2, pady=3)
 
         # --- Правая колонка: Маршруты ---
         right_frame = ctk.CTkFrame(self.control_tab, corner_radius=10)
@@ -482,7 +496,7 @@ class RobotControlUI(ctk.CTk):
         self.stop_motion.clear()
         self.worker = mp.Process(name='robot_worker', target=robot_control.main,
                                  args=(self.commands, self.messages, self.stop_motion, self.shutdown,
-                                       self.heartbeat, self.diagnost_ip, self.surgeon_ip))
+                                       self.heartbeat, self.diagnost_ip, self.surgeon_ip, self.speed_percent))
         self.worker.start()
         self.control_initiate_btn.configure(state='disabled')
 
@@ -517,6 +531,26 @@ class RobotControlUI(ctk.CTk):
 
     def control_launch(self):
         self.submit('manual_start')
+
+    def _set_speed_from_slider(self, value):
+        percent = round(value)
+        self.speed_percent.value = percent
+        self.speed_entry_var.set(str(percent))
+
+    def _set_speed_from_entry(self, event=None):
+        raw = self.speed_entry_var.get().strip()
+        try:
+            percent = int(raw)
+            if raw not in (str(percent), '+' + str(percent)):
+                raise ValueError(raw)
+            robot_control.speed_fraction(percent)
+        except ValueError:
+            self.speed_entry_var.set(str(self.speed_percent.value))
+            self.action_status_var.set('Укажите целое число скорости от 0 до 100%')
+            return
+        self.speed_percent.value = percent
+        self.speed_slider.set(percent)
+        self.speed_entry_var.set(str(percent))
 
     def control_stop(self):
         self.stop_motion.set()
