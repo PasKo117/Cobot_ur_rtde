@@ -1,27 +1,21 @@
+"""Check selected TCP ports of one host. No sockets are opened at import."""
+import argparse
 import socket
-import time
 
-ip = '192.168.8.3'
+PORTS = [80, 443, 502, 8000, 8080, 9093, 5000, 6000, 1883, 5001]
 
-ports = [80, 443, 502, 8000, 8080, 9093, 5000, 6000, 1883, 5001]
 
-print(f"Сканирование портов на {ip}...\n")
-open_ports = []
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ip', default='192.168.8.3')
+    args = parser.parse_args(argv)
+    for port in PORTS:
+        try:
+            with socket.create_connection((args.ip, port), timeout=0.5):
+                print(f'{args.ip}:{port} открыт')
+        except OSError:
+            print(f'{args.ip}:{port} закрыт/недоступен')
 
-for port in ports:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1)
 
-    try:
-        result = sock.connect_ex((ip, port))
-        status = "ОТКРЫТ" if result == 0 else " закрыт"
-        if result == 0:
-            open_ports.append(port)
-        print(f"Порт {port:5d}: {status}")
-    except:
-        print(f"Порт {port:5d}:️ ошибка")
-    finally:
-        sock.close()
-    time.sleep(0.1)
-
-print("\nОткрытые порты:", open_ports if open_ports else "не найдено")
+if __name__ == '__main__':
+    main()

@@ -1,36 +1,30 @@
-import serial
-import time
-import tkinter as tk
+"""Read the legacy laser controller on a serial port; no robot connection."""
+import argparse
+
+REQUEST = bytes.fromhex('02 43 B0 01 03 F2')
 
 
-#a=('0xF2')
-#print(a)
-#bytes.fromhex(a)
-
-a=b'\x02\x43\xB0\x01\x03\xF2'
-
-ser = serial.Serial('COM2', 9600)
-
-while True:
-
-    ser.write(a)
-    data = ser.read(6)
-    #print(data)
-    b = str(hex(data[2]))
-    c = str(hex(data[3]))
-    #print(b, c)
-    if (len(c)>3):
-        d = (b+c[2]+c[3])
-        #print(d)
-        val = (int(d, 16))
-        #print(len(b))
-        if (len(str(val))>4):
-            print('out if range')
-        else:
-            print(val)
-
-    time.sleep(0.1)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--port', default='COM2')
+    parser.add_argument('--once', action='store_true')
+    args = parser.parse_args(argv)
+    import serial
+    with serial.Serial(args.port, baudrate=9600, timeout=1) as link:
+        try:
+            while True:
+                link.write(REQUEST)
+                response = link.read(6)
+                if len(response) != 6:
+                    print('Таймаут: ожидалось 6 байтов')
+                else:
+                    print('Ответ, hex:', response.hex(' '),
+                          'сырое значение:', int.from_bytes(response[2:4], 'big', signed=True))
+                if args.once:
+                    return
+        except KeyboardInterrupt:
+            return
 
 
-
-
+if __name__ == '__main__':
+    main()
