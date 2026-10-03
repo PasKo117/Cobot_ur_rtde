@@ -1,0 +1,51 @@
+name: Convert DOCX to README
+
+on:
+  push:
+    paths:
+      - 'docs/source.docx'  # <--- ПРОВЕРЬТЕ ЭТОТ ПУТЬ!
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Install Pandoc
+        run: sudo apt-get update && sudo apt-get install -y pandoc
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: pip install pypandoc
+
+      - name: Run Conversion Script
+        run: python scripts/convert_docx.py  # Запускаем отдельный скрипт
+
+      - name: Commit and Push Changes
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          
+          git add README.md
+          git add media/ 2>/dev/null || true
+          
+          if git diff --staged --quiet; then
+            echo "ℹ️ Изменений нет. Пропускаю коммит."
+            exit 0
+          fi
+          
+          git commit -m "docs: auto-update README and images from DOCX [skip ci]"
+          
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          git push origin HEAD:$CURRENT_BRANCH

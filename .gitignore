@@ -1,0 +1,7 @@
+venv
+build
+Э*
+logs
+.idea
+__pycache__
+*.csv
