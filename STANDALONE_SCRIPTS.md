@@ -45,8 +45,8 @@
 | Файл | Запуск | Назначение |
 |---|---|---|
 | `Tracking_Diagnost.py`, `Tracking_Hirurg.py` | `python Tracking_Diagnost.py --once`; `python Tracking_Hirurg.py --interval 0.1` | RTDE суставы (рад) переводятся в градусы для модели `Diagnost` / `Hirurg` в открытом RoboDK. `--targets` добавляет целевые точки при изменении >10°. Нужен пакет `robodk`. |
-| `camDiagn.py`, `camHirurg.py`, `cam.py` | `python camDiagn.py` и т. д. | Отдельные окна камер диагноста / хирурга (старый `cam.py` — хирург). Esc — закрыть, `+`/`-` — зум. Нужен `opencv-python`. |
-| `ip_cam.py` | `python ip_cam.py --pan 20` | Одна PTZ-команда для сетевой камеры. Имя и пароль задаются через переменные окружения `COBOT_CAMERA_USER` и `COBOT_CAMERA_PASSWORD`; нет бесконечного качания камеры. Нужен `requests`. |
+| `camera_window.py`, `camDiagn.py`, `camHirurg.py`, `cam.py` | `python camera_window.py` | Общее перемещаемое окно трёх Hikvision: RTSP, стрелки PTZ, зум. Старые имена запускают это же окно. Esc — стоп камер; крестик — закрытие. См. [CAMERAS.md](CAMERAS.md). |
+| `ip_cam.py` | `python ip_cam.py` | Совместимый запуск окна камер с PTZ. Старый `--pan` удалён: движение теперь выполняется удержанием кнопок в окне и ограничено по времени. |
 | `force_measure/Force measure.py` | `python "force_measure/Force measure.py"` | Окно усилия диагноста по RTDE без `urx`. |
 | `laser_sens/laser_sens.py` | `python laser_sens/laser_sens.py` | Окно двух лазерных расстояний из `laser_sensor_lib.py`, сервер Pi `192.168.8.37:5000`. |
 | `pomogite_1.py` | `python pomogite_1.py --ip 192.168.8.3 --port 6000` | Одно измерение по отдельному бинарному протоколу OD Mini. Требует соответствующий TCP сервер; это **не** JSON сервер Pi. |

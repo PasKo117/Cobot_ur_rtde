@@ -1,10 +1,6 @@
-"""Camera HIRURG: Esc closes, +/- changes digital zoom."""
-from camera_view import show
+"""Compatibility entry point: all three Hikvision cameras with PTZ, no robots."""
+from camera_window import main
 
 
-def main():
-    show('HIRURG', 'http://192.168.8.149:8081/')
-
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    raise SystemExit(main())

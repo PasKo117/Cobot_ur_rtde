@@ -3,8 +3,6 @@ import csv
 import math
 import multiprocessing as mp
 import socket
-import subprocess
-import sys
 import threading
 import time
 import tkinter as tk
@@ -116,7 +114,8 @@ class RobotControlUI(ctk.CTk):
         self.paths = {'diagnost': [], 'surgeon': []}
         self.pending_path_save = None
         self.start_pose = None
-        self.camera_processes = {}
+        self.camera_window = None
+        self._closing = False
         self.telemetry_logger = CSVLogger()
         self.after(100, self.poll_worker)
         self.monitor = Thread(target=self.system_monitor, daemon=True)
@@ -374,23 +373,18 @@ class RobotControlUI(ctk.CTk):
                      'Доступно только осевое продвижение хирурга; угол должен быть 0.').grid(column=0, row=3, pady=10)
 
     def create_cam_tab(self):
-        """Вкладка Камеры"""
-        self.cam_tab.grid_rowconfigure(0, weight=1)
-        self.cam_tab.grid_columnconfigure(0, weight=1)
-
+        """Three Hikvision streams and PTZ in one independent, movable window."""
         frame = ctk.CTkFrame(self.cam_tab, corner_radius=15)
         frame.place(relx=0.5, rely=0.5, anchor="center")
-
-        ctk.CTkLabel(frame, text="УПРАВЛЕНИЕ ВИДЕОПОТОКОМ", font=ctk.CTkFont(size=14, weight="bold")).grid(column=0,
-                                                                                                           row=0,
-                                                                                                           columnspan=2,
-                                                                                                           pady=20)
-
-        self.cam_d_btn = ctk.CTkButton(frame, text='📷 Камера диагноста', command=self.cam_d, width=200, height=50)
-        self.cam_d_btn.grid(column=0, row=1, padx=20, pady=20)
-
-        self.cam_h_btn = ctk.CTkButton(frame, text='📷 Камера хирурга', command=self.cam_h, width=200, height=50)
-        self.cam_h_btn.grid(column=1, row=1, padx=20, pady=20)
+        ctk.CTkLabel(frame, text="ТРИ КАМЕРЫ HIKVISION", font=ctk.CTkFont(size=16, weight="bold")).pack(
+            padx=30, pady=(25, 10))
+        ctk.CTkLabel(frame, text="192.168.8.64  ·  192.168.8.65  ·  192.168.8.66").pack(padx=25, pady=5)
+        ctk.CTkButton(frame, text="Открыть окно камер и PTZ", command=self.open_cameras,
+                      width=300, height=48).pack(padx=30, pady=15)
+        ctk.CTkLabel(frame, text="Одно окно со всеми камерами можно перенести на второй монитор.\n"
+                     "Стрелки, зум и скорость PTZ находятся под каждым изображением.\n"
+                     "Подключение роботов для просмотра камер не требуется.",
+                     wraplength=540).pack(padx=25, pady=(0, 25))
 
     def create_telemetry_tab(self):
         """Вкладка Телеметрия"""
@@ -572,20 +566,24 @@ class RobotControlUI(ctk.CTk):
                     self.messages.put(('ERROR', {'text': f'Разблокировка: {exc}'}))
         threading.Thread(target=task, daemon=True).start()
 
-    def camera(self, name, script):
-        process = self.camera_processes.get(name)
-        if process and process.poll() is None:
-            process.terminate()
-            process.wait(timeout=2)
-            del self.camera_processes[name]
-        else:
-            self.camera_processes[name] = subprocess.Popen([sys.executable, str(Path(__file__).with_name(script))])
+    def open_cameras(self):
+        if self.camera_window is not None and self.camera_window.winfo_exists():
+            self.camera_window.present()
+            return
+        try:
+            from camera_window import CameraWindow
+            self.camera_window = CameraWindow(self)
+        except Exception as exc:
+            self.camera_window = None
+            self.show_error(f'Не удалось открыть камеры: {type(exc).__name__}.\n'
+                            'Проверьте cameras.local.json и установите зависимости:\n'
+                            'python -m pip install -r requirements-cameras.txt')
 
     def cam_d(self):
-        self.camera('diagnost', 'camDiagn.py')
+        self.open_cameras()
 
     def cam_h(self):
-        self.camera('surgeon', 'camHirurg.py')
+        self.open_cameras()
 
     def submit(self, action, **args):
         if not self.worker or not self.worker.is_alive():
@@ -812,12 +810,21 @@ class RobotControlUI(ctk.CTk):
         mb(title='ВНИМАНИЕ!', message=msg, icon='warning')
 
     def close(self):
+        if self._closing:
+            return
+        self._closing = True
         self.monitor_stop_event.set()
+        # Request camera stop before the existing robot shutdown procedure.
+        camera = self.camera_window
+        camera_open = camera is not None and camera.winfo_exists()
+        if camera_open:
+            camera.close()
         self.control_disable()
-        for proc in self.camera_processes.values():
-            if proc.poll() is None:
-                proc.terminate()
-        self.destroy()
+        # Let PTZ finish its bounded HTTP stop without blocking Tk's event loop.
+        if camera_open and not camera.done:
+            camera.on_closed = self.destroy
+        else:
+            self.destroy()
 
 
 if __name__ == '__main__':
