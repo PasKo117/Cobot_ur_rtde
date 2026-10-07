@@ -1,0 +1,28 @@
+{
+  "defaults": {
+    "username": "admin",
+    "password": "Technored",
+    "rtsp_port": 554,
+    "http_port": 80,
+    "scheme": "http",
+    "channel": 1,
+    "streams": [
+      102,
+      101
+    ]
+  },
+  "cameras": [
+    {
+      "name": "Камера 1",
+      "host": "192.168.8.64"
+    },
+    {
+      "name": "Камера 2",
+      "host": "192.168.8.65"
+    },
+    {
+      "name": "Камера 3",
+      "host": "192.168.8.66"
+    }
+  ]
+}

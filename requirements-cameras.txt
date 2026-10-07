@@ -1,0 +1,3 @@
+opencv-python>=4.8,<5
+Pillow>=10
+requests>=2.31,<3
