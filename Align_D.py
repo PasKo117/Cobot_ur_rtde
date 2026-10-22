@@ -1,10 +1,35 @@
-import urx
+import time
+from ur_rtde import RTDEControlInterface, RTDEReceiveInterface
+
 
 def main():
-    rob = urx.Robot("192.168.8.3")
+    ip = "192.168.8.3"
+    print(f"Подключение к диагносту ({ip})...")
+    try:
+        ctrl = RTDEControlInterface(ip)
+        recv = RTDEReceiveInterface(ip)
 
-    pose = rob.getl()
-    rob.movel((pose[0],pose[1],pose[2],0,3.14,0), acc = 0.2, vel=0.2)
+        if not ctrl.isConnected():
+            print("Ошибка подключения!")
+            return
 
-if __name__ == "__main__":
+        pose = recv.getActualTCPPose()
+        print(f"Текущая поза: {pose}")
+
+        # Пример выравнивания (подставь свои целевые координаты)
+        target_pose = [pose[0], pose[1], pose[2] + 0.05, pose[3], pose[4], pose[5]]
+        print("Выполнение движения...")
+        ctrl.moveL(target_pose, speed=0.2, acceleration=0.2)
+
+        while ctrl.isProgramRunning():
+            time.sleep(0.1)
+
+        print("Выравнивание завершено.")
+        ctrl.disconnect()
+        recv.disconnect()
+    except Exception as e:
+        print(f"Ошибка: {e}")
+
+
+if __name__ == '__main__':
     main()

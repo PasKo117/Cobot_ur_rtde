@@ -1,206 +1,77 @@
-import urx
-import time
-import socket
-from math import pi
+"""Laser/robot experiment with one bounded probe per explicit --execute call.
 
-import multiprocessing as mp
+Uses the Raspberry Pi JSON sensor protocol from laser_sensor_lib.py. Legacy
+raw 192.168.8.149:9093 messages are not assumed to be compatible.
+"""
+import argparse
+import csv
+from datetime import datetime
+from pathlib import Path
 
-d = mp.Value("i", 32767)
-h = mp.Value("i", 32767)
-
-def rob_init():
-
-    hirurg = urx.Robot("192.168.8.4")
-    diagnost = urx.Robot("192.168.8.3")
-
-    time.sleep(5)
-
-    d_pose = diagnost.getl()
-    diagnost.movel((d_pose[0], d_pose[1], d_pose[2], 0, 3.14, 0), acc=0.2, vel=0.2)
-
-    h_pose = hirurg.getl()
-    hirurg.movel((h_pose[0], h_pose[1], h_pose[2], 3.14 / 2, 0, 0), acc=0.2, vel=0.2)
-
-    return diagnost, hirurg
-
-def set_hirurg_angle(hirurg, angle):
-    h_pose = hirurg.getl()
-    hirurg.movel((h_pose[0], h_pose[1], h_pose[2], 3.14 / 2, 0, 0), acc=0.2, vel=0.2)
-    while hirurg.is_program_running():
-        pass
-
-    if angle != 0:
-        angle *= (pi / 180)
-        o = hirurg.get_orientation()
-        o.rotate_xt(angle)
-        hirurg.set_orientation(o, 0.1, 0.1)
-        while hirurg.is_program_running():
-            pass
-    else:
-        return -1
-
-def ones_complement_to_signed(value, bit_length = 16):
-    if value & (1 << (bit_length-1)):
-        value = ~value & ((1<< bit_length)-1)
-        value = -(value +1)
-    return value
-
-def get_dist(d, h):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # конфигурация соединения
-    sock.connect(('192.168.8.149', 9093))
-    while True:
-        data = sock.recv(16)  # получение данных
-        ts = data.decode()
-        dd = ts.split('end')
-        hh = dd[1].split('end')
-        # print(dd)
-        d.value = ones_complement_to_signed(int(dd[0]))
-        h.value = ones_complement_to_signed(int(hh[0]))
-        # print(hh)
-    # return ones_complement_to_signed(int(d[0])), ones_complement_to_signed(int(h[0]))
-
-def get_av_dist(cnt):
-    global d, h
-    sum_d = 0
-    sum_h = 0
-
-    for k in range(cnt):
-        sum_d += d.value
-        sum_h += h.value
-        # time.sleep(1)
-
-    return int(sum_d/cnt) , int(sum_h/cnt)
-
-def find_start(diagnost, hirurg):
-    diagnost.translate_tool((0, 0, -0.02), 0.005, 0.005)
-    while diagnost.is_program_running():
-        pass
-
-    while get_av_dist(10)[0] == 32767:
-        # print(d.value, get_av_dist(10)[0])
-        diagnost.translate_tool((0, 0, 0.001), 0.001, 0.001)
-        while diagnost.is_program_running():
-            pass
-
-    # hirurg.translate_tool((0, 0, -0.02), 0.005, 0.005)
-    # while hirurg.is_program_running():
-    #     pass
-    # print(get_av_dist(100)[1])
-    # while get_av_dist(10)[1] == 32767:
-    #     print(get_av_dist(10)[1])
-    #     hirurg.translate_tool((0, 0, 0.001), 0.001, 0.001)
-    #     while hirurg.is_program_running():
-    #         pass
+from laser_sensor_lib import LaserSensorClient
+from standalone_rtde import RobotSession
 
 
+def ones_complement_to_signed(value, bit_length=16):
+    mask = (1 << bit_length) - 1
+    return -((~value & mask) + 1) if value & (1 << (bit_length-1)) else value
 
 
+def laser_values(client):
+    values = client.get_sensor_values()
+    if values['status_1'] != 'ok' or values['status_2'] != 'ok':
+        raise ConnectionError(f'Лазерные показания недоступны: {values}')
+    return values['sensor_1'], values['sensor_2']
 
 
+def run_probe(robot, sensor, *, step_mm, speed, angle_deg=0):
+    if not 0 < abs(step_mm) <= 5 or not 0 < speed <= 0.02 or not -25 <= angle_deg <= 25:
+        raise ValueError('Шаг <= 5 мм, скорость <= 0.02 м/с, угол <= 25°')
+    start = robot.pose()
+    if angle_deg:
+        from scipy.spatial.transform import Rotation
+        from math import radians
+        target = start[:3] + list((Rotation.from_rotvec(start[3:])
+                                    * Rotation.from_euler('x', radians(angle_deg))).as_rotvec())
+        robot.move(target, 0.02)
+    before = laser_values(sensor)
+    robot.translate(step_mm / 1000, speed)
+    after = laser_values(sensor)
+    return [('before', *start, *before), ('after', *robot.pose(), *after)]
 
 
-def experiment_uno(diagnost, hirurg):
-
-    for x in range(10):
-        step = 0.001*(x+1)
-        for k in range(10):
-            with open(f'Э1Д/шаг {x+1} мм {k}.txt', "w") as file:
-                start_pose = diagnost.getl()[2]
-                for i in range(10):
-                    diagnost.translate_tool((0, 0, step*(-1)**k), 0.001, 0.001)
-                    while diagnost.is_program_running():
-                        pass
-                    file.write(f'{i + 1} {diagnost.getl()[2] - start_pose} {get_av_dist(10)[0]}\n')
-
-    # for x in range(10):
-    #     step = 0.001*(x+1)
-    #     for k in range(10):
-    #         with open(f'Э1Х/шаг {x+1} мм {k}.txt', "w") as file:
-    #             start_pose_x = hirurg.getl()[1]
-    #             for i in range(10):
-    #                 hirurg.translate_tool((0, 0, step*(-1)**k), 0.001, 0.001)
-    #                 while hirurg.is_program_running():
-    #                     pass
-    #                 file.write(f'{i + 1} {hirurg.getl()[1] - start_pose_x} {get_av_dist(10)[1]}\n')
-
-def experiment_duo(hirurg, diagnost):
-    for x in range(10):
-        step = 0.001*(x+1)
-        for j in range(5):
-            angle = 5*(j+1)
-            set_hirurg_angle(hirurg, angle)
-            find_start(diagnost, hirurg)
-            for k in range(10):
-                with open(f'Э2Х/шаг {x+1} мм, угол {angle} {k}.txt', "w") as file:
-                    start_pose_x = hirurg.getl()[1]
-                    start_pose_z = hirurg.getl()[2]
-                    for i in range(10):
-                        hirurg.translate_tool((0, 0, step*(-1)**k), 0.001, 0.001)
-                        while hirurg.is_program_running():
-                            pass
-                        file.write(f'{i + 1} {hirurg.getl()[1] - start_pose_x} {hirurg.getl()[2]-start_pose_z} {get_av_dist(10)[1]}\n')
-
-def experiment_tres(diagnost, hirurg):
-
-    for x in range(10):
-        speed = 0.001*(x+1)
-        for k in range(6):
-            with open(f'Э3Д/скорость {x + 1} мм {k}.txt', "w") as file:
-                start_pose = diagnost.getl()[2]
-                start_time = time.time()
-                diagnost.translate_tool((0,0,0.1*(-1)**k), speed, speed)
-                while hirurg.is_program_running():
-                    pass
-                end_time = time.time()
-                end_pose = diagnost.getl()[2]
-                elapsed_time = end_time - start_time
-                delta = end_pose - start_pose
-                file.write(f'{elapsed_time} {delta}\n')
-
-    for x in range(10):
-        speed = 0.001*(x+1)
-        for k in range(6):
-            with open(f'Э3Х/скорость {x + 1} мм {k}.txt', "w") as file:
-                start_pose = hirurg.getl()[2]
-                start_time = time.time()
-                hirurg.translate_tool((0,0,0.1*(-1)**k), speed, speed)
-                while hirurg.is_program_running():
-                    pass
-                end_time = time.time()
-                end_pose = hirurg.getl()[2]
-                elapsed_time = end_time - start_time
-                delta = end_pose - start_pose
-                file.write(f'{elapsed_time} {delta}\n')
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--experiment', choices=('uno', 'duo', 'tres'), default='uno',
+                        help='uno: диагност; duo: хирург с углом; tres: хирург без угла')
+    parser.add_argument('--execute', action='store_true', help='Выполнить один пробный шаг')
+    parser.add_argument('--step-mm', type=float, default=1)
+    parser.add_argument('--speed', type=float, default=0.005)
+    parser.add_argument('--angle-deg', type=float, default=5)
+    args = parser.parse_args(argv)
+    sensor = LaserSensorClient()
+    if not sensor.connect(max_attempts=1):
+        raise ConnectionError('Raspberry Pi лазерных датчиков недоступен')
+    try:
+        values = laser_values(sensor)
+        print('Диагност / хирург, мм:', values)
+        if not args.execute:
+            return
+        name = 'diagnost' if args.experiment == 'uno' else 'surgeon'
+        angle = args.angle_deg if args.experiment == 'duo' else 0
+        with RobotSession(name) as robot:
+            rows = run_probe(robot, sensor, step_mm=args.step_mm,
+                             speed=args.speed, angle_deg=angle)
+        output = Path('experiments') / f'laser_{args.experiment}_{datetime.now():%Y%m%d_%H%M%S}.csv'
+        output.parent.mkdir(exist_ok=True)
+        with output.open('w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['phase','x','y','z','rx','ry','rz','diagnost_mm','surgeon_mm'])
+            writer.writerows(rows)
+        print('Файл:', output)
+    finally:
+        sensor.disconnect()
 
 
-
-
-
-
-
-
-
-
-def main():
-    global d, h
-    D, H = rob_init()
-
-    data_acquisitor = mp.Process(target=get_dist, args = (d,h))
-    data_acquisitor.start()
-
-    find_start(D, H)
-    experiment_uno(D, H)
-    # experiment_duo(H, D)
-    # experiment_tres(D, H)
-
-
-    D.close()
-    H.close()
-
-
-
-
-if __name__ == "__main__":
-
-
+if __name__ == '__main__':
     main()

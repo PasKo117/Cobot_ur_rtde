@@ -1,173 +1,79 @@
-import math3d as m3d
-import numpy as np
-from scipy.linalg import svd
+"""Rigid transformation diagnost base -> surgeon base in RTDE TCP units."""
 import json
-import os
-from scipy.spatial.transform import Rotation as R_scipy
+from pathlib import Path
+import numpy as np
+from scipy.spatial.transform import Rotation
 
 
 class CalibrationManager:
-    def __init__(self, filename="calibration_data.json"):
-        self.filename = filename
-        self.transform = None  # m3d.Transform (Base1 -> Base2)
+    def __init__(self, filename=None):
+        self.filename = Path(filename or Path(__file__).with_name('calibration_data.json'))
+        self.rotation = None
+        self.translation = None
+        self.rmse = None
 
     def calculate_transform_from_points(self, points1, points2):
-        """
-        Вычисляет трансформацию между двумя наборами точек.
-        points1/2: список m3d.Vector или списков [x,y,z]
-        Возвращает: m3d.Transform
-        """
-        # Конвертируем в numpy для SVD
-        if isinstance(points1[0], m3d.Vector):
-            pts1 = np.array([p.get_array() for p in points1])
-            pts2 = np.array([p.get_array() for p in points2])
-        else:
-            pts1 = np.array(points1)
-            pts2 = np.array(points2)
-
-        # 1. Центроиды
-        c1 = np.mean(pts1, axis=0)
-        c2 = np.mean(pts2, axis=0)
-
-        # 2. Центрирование
-        Q1 = pts1 - c1
-        Q2 = pts2 - c2
-
-        # 3. Матрица ковариации
-        H = np.dot(Q1.T, Q2)
-
-        # 4. SVD разложение
-        U, S, Vt = svd(H)
-        R = np.dot(Vt.T, U.T)
-
-        # 5. Проверка на отражение
-        if np.linalg.det(R) < 0:
-            Vt[-1, :] *= -1
-            R = np.dot(Vt.T, U.T)
-
-        # 6. Вектор переноса
-        t = c2 - np.dot(R, c1)
-
-        # 7. Создаём m3d.Transform
-        self.transform = m3d.Transform(
-            m3d.Orientation(R),
-            m3d.Vector(t)
-        )
-        return self.transform
-
-    def save(self, metadata=None):
-        """Сохраняет трансформацию в JSON"""
-        if self.transform is None:
-            raise ValueError("Нет данных для сохранения")
-
-        R = self.transform.orient.get_array()
-        t = self.transform.pos.get_array()
-
-        data = {
-            "R": R.tolist(),
-            "t": t.tolist()
-        }
-        if metadata:
-            data["metadata"] = metadata
-
-        with open(self.filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4)
-        print(f"✓ Калибровка сохранена в {self.filename}")
-
-    def load(self):
-        """Загружает трансформацию из файла"""
-        if not os.path.exists(self.filename):
-            raise FileNotFoundError(f"Файл {self.filename} не найден!")
-
-        with open(self.filename, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-        R = np.array(data['R'])
-        t = np.array(data['t'])
-
-        self.transform = m3d.Transform(
-            m3d.Orientation(R),
-            m3d.Vector(t)
-        )
-        print(f"✓ Калибровка загружена из {self.filename}")
-        return self.transform
-
-    def transform_pose(self, pose_list):
-        """
-        Трансформирует позу из Base1 в Base2.
-
-        Args:
-            pose_list: [x,y,z, rx,ry,rz] от rob.getl() (в метрах и радианах)
-
-        Returns:
-            [x,y,z, rx,ry,rz] для второго робота
-        """
-        if self.transform is None:
-            raise ValueError("Сначала загрузите данные калибровки (load)!")
-
-        # Создаём трансформацию из позы Робота 1
-        T1 = m3d.Transform(
-            m3d.Orientation(pose_list[3:]),
-            m3d.Vector(pose_list[:3])
-        )
-
-        # Применяем калибровочную трансформацию: T2 = T_calib * T1
-        T2 = self.transform * T1
-
-        # Конвертируем ориентацию (матрица 3x3) обратно в вектор поворота
-        orient_matrix = T2.orient.get_array()
-        rot_vec = R_scipy.from_matrix(orient_matrix).as_rotvec()
-
-        # Собираем итоговый список для urx.movel()
-        pos = T2.pos.get_array()
-        pose_out = list(pos) + list(rot_vec)
-
-        return pose_out
+        a = np.asarray(points1, dtype=float)
+        b = np.asarray(points2, dtype=float)
+        if a.shape != b.shape or a.ndim != 2 or a.shape[1] != 3 or len(a) < 4:
+            raise ValueError('Нужно как минимум 4 парные точки XYZ в метрах')
+        if not (np.isfinite(a).all() and np.isfinite(b).all()):
+            raise ValueError('Координаты должны быть конечными числами')
+        ac, bc = a.mean(axis=0), b.mean(axis=0)
+        if np.linalg.matrix_rank(a - ac, tol=1e-6) < 2:
+            raise ValueError('Точки почти коллинеарны; соберите разные положения')
+        u, _, vt = np.linalg.svd((a - ac).T @ (b - bc))
+        d = np.eye(3)
+        d[2, 2] = np.linalg.det(vt.T @ u.T)
+        self.rotation = vt.T @ d @ u.T
+        self.translation = bc - self.rotation @ ac
+        residual = a @ self.rotation.T + self.translation - b
+        self.rmse = float(np.sqrt(np.mean(np.sum(residual**2, axis=1))))
+        return self.rotation, self.translation
 
     def verify(self):
-        """Проверяет корректность матрицы поворота"""
-        if self.transform is None:
+        if self.rotation is None or self.translation is None:
             return False
-        R = self.transform.orient.get_array()
-        det = np.linalg.det(R)
-        ortho = np.allclose(np.dot(R, R.T), np.eye(3), atol=1e-6)
-        return abs(det - 1.0) < 0.01 and ortho
+        r = self.rotation
+        return bool(np.isfinite(r).all() and np.isfinite(self.translation).all()
+                    and np.allclose(r @ r.T, np.eye(3), atol=1e-3)
+                    and abs(np.linalg.det(r) - 1) < 1e-3)
 
-    def get_translation_distance(self):
-        """Возвращает расстояние между базами в метрах"""
-        if self.transform is None:
-            return 0
-        return self.transform.pos.length
+    def save(self, metadata=None):
+        if not self.verify():
+            raise ValueError('Некорректная калибровка')
+        data = {'R': self.rotation.tolist(), 't': self.translation.tolist()}
+        if metadata:
+            data['metadata'] = metadata
+        self.filename.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+        return self.filename
+
+    def load(self):
+        data = json.loads(self.filename.read_text(encoding='utf-8'))
+        self.rotation = np.asarray(data['R'], dtype=float)
+        self.translation = np.asarray(data['t'], dtype=float)
+        if self.rotation.shape != (3, 3) or self.translation.shape != (3,) or not self.verify():
+            raise ValueError('Файл калибровки: неверная матрица R или вектор t')
+        return self.rotation, self.translation
+
+    def transform_pose(self, pose_list):
+        from robot_control import valid_pose
+        pose = valid_pose(pose_list)
+        if not self.verify():
+            raise ValueError('Сначала загрузите/рассчитайте калибровку')
+        position = self.rotation @ pose[:3] + self.translation
+        orientation = (Rotation.from_matrix(self.rotation)
+                       * Rotation.from_rotvec(pose[3:])).as_rotvec()
+        return list(position) + list(orientation)
 
     def transform_position_only(self, pose_list, orientation_offset=None):
-        """
-        Трансформирует ТОЛЬКО ПОЗИЦИЮ из Base1 в Base2.
-        Ориентация задаётся независимо для безопасности.
+        from robot_control import valid_pose
+        pose = valid_pose(pose_list)
+        if not self.verify():
+            raise ValueError('Сначала загрузите/рассчитайте калибровку')
+        position = self.rotation @ pose[:3] + self.translation
+        orientation = orientation_offset if orientation_offset is not None else pose[3:]
+        return list(position) + list(orientation)
 
-        Args:
-            pose_list: [x,y,z, rx,ry,rz] от rob.getl()
-            orientation_offset: [rx,ry,rz] в радианах - дополнение к ориентации
-                               (например, [0, 0, 3.14] для разворота на 180°)
-
-        Returns:
-            [x,y,z, rx,ry,rz] для второго робота
-        """
-        if self.transform is None:
-            raise ValueError("Сначала загрузите данные калибровки (load)!")
-
-        # 1. Трансформируем позицию через калибровочную матрицу
-        pos1 = np.array(pose_list[:3])
-        pos2 = np.dot(self.transform.orient.get_array(), pos1) + self.transform.pos.get_array()
-
-        # 2. Ориентацию задаём независимо (для безопасности)
-        if orientation_offset is None:
-            # По умолчанию: разворот на 180° вокруг Z (роботы смотрят друг на друга)
-            orientation_offset = [0, 0, np.pi]
-
-        # Базовая ориентация (можно настроить под вашу задачу)
-        base_orientation = [0, 0, 0]  # Или [np.pi, 0, 0] для вертикального подхода
-
-        # Итоговая ориентация = базовая + оффсет
-        final_orientation = list(np.array(base_orientation) + np.array(orientation_offset))
-
-        return list(pos2) + final_orientation
+    def get_translation_distance(self):
+        return float(np.linalg.norm(self.translation)) if self.translation is not None else 0.0

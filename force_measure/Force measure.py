@@ -1,51 +1,34 @@
-import urx
-import socket
-import time
-from random import randint
-from tkinter import Tk, Label, mainloop
-from time import sleep
+"""Standalone diagnostic force display; uses RTDEReceiveInterface."""
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import tkinter as tk
+from standalone_rtde import RobotSession
 
 
-# rob1 = urx.Robot("192.168.8.4", use_rt=True)
-rob2 = urx.Robot("192.168.8.3", use_rt=True)
-running = True
-
-fname = ('force' + str(time.asctime(time.localtime(time.time()))))
-
-class App(Tk):
-    def __init__(self):
+class App(tk.Tk):
+    def __init__(self, robot):
         super().__init__()
-        self.geometry("800x400+100+80") # создание окна
-        self.label1 = Label(self, font='arial 17')
-        self.label2 = Label(self, font='arial 17')
+        self.robot = robot
+        self.title('Сила TCP диагноста')
+        self.label = tk.Label(self, font=('Arial', 17), padx=20, pady=20)
+        self.label.pack()
+        self.protocol('WM_DELETE_WINDOW', self.destroy)
+        self.after(100, self.refresh)
 
-        self.label1.pack()
-        self.label2.pack()
-        self.run()
-
-    def run(self):
-
-            # z1 = (rob1.get_tcp_force()[2])
-            # z1 = round(z1, 1)
-            z2 = (rob2.get_tcp_force()[2])
-            z2 = round(z2, 1)
-            #print(z2, '____')
-            
+    def refresh(self):
+        try:
+            self.label.configure(text=f'Сила диагноста Z: {self.robot.force()[2]:.2f} Н')
+        except Exception as exc:
+            self.label.configure(text=f'Ошибка RTDE: {exc}')
+            return
+        self.after(100, self.refresh)
 
 
-            self.label1["text"] = (str('Усилие') + str(' Робот Диагност: ') + str(z2) + str(' Н ' )) # Вывод текста в окне
-            # self.label2["text"] = (str('Усилие') + str(' Робот Хирург: ') + str(z1) + str(' Н ' ))
-            self.after(10, self.run)
-            
-            # file = open((fname.replace(':','_') + ".txt"), "a")
-            # file.write(str(time.asctime(time.localtime(time.time()))))
-            # file.write((' Робот-диагност' + " | " + str(z2) +  " Н" + " | " + ' Робот-хирург' + " | " + str(z1) + " Н" + " | "+str('\n')))
-            # file.close
-		
-
-while True:
+def main():
+    with RobotSession('diagnost', control=False) as robot:
+        App(robot).mainloop()
 
 
-
-    app = App()
-    app.mainloop()
+if __name__ == '__main__':
+    main()

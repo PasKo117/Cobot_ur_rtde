@@ -5,22 +5,43 @@ import socket
 import time
 import multiprocessing as mp
 
+
 def main(heartbeat):
     HOST = "192.168.8.3"
     PORT = 29999
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect((HOST, PORT))
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5.0)
+        s.connect((HOST, PORT))
 
-    cmd = "power on\n"
-    # cmd = "stop\n"
-    # cmd = "play\n"
-    # cmd = "pause\n"
+        # 1. Включение питания
+        cmd = "power on\n"
+        s.send(cmd.encode())
+        response = s.recv(4096).decode().strip()
+        print(f"[Диагност] Ответ на 'power on': {response}")
 
-    s.send(cmd.encode())
+        time.sleep(5)
 
-    time.sleep(5)
+        # 2. Снятие тормозов
+        cmd = "brake release\n"
+        s.send(cmd.encode())
+        response = s.recv(4096).decode().strip()
+        print(f"[Диагност] Ответ на 'brake release': {response}")
 
-    cmd = "brake release\n"
+    except Exception as e:
+        print(f"[Диагност] Ошибка при включении: {e}")
+    finally:
+        if s:
+            s.close()
 
-    s.send(cmd.encode())
     heartbeat.put((mp.current_process().name, "FINISHED"))
+
+
+if __name__ == "__main__":
+    class DummyQueue:
+        def put(self, item):
+            print(f"Heartbeat: {item}")
+
+
+    main(DummyQueue())
